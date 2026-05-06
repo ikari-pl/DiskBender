@@ -117,7 +117,31 @@ end;
 
 begin
   if ParamCount = 0 then
-    Usage;
+  begin
+    WriteLn('DiskBender - Vintage Disk/Snapshot Management');
+    WriteLn;
+    Write('DSK path (or Enter for help): ');
+    ReadLn(DSKPath);
+    DSKPath := Trim(DSKPath);
+    if DSKPath = '' then
+      Usage;
+    if not FileExists(DSKPath) then
+    begin
+      WriteLn('Error: File not found: ', DSKPath);
+      Halt(1);
+    end;
+    DSKPath := ExpandFileName(DSKPath);
+    Disk := TDiskBenderDSK.Create(DSKPath);
+    try
+      Disk.Load;
+      App := TDiskBenderTUI.Create(DSKPath, Disk);
+      App.Run;
+      App.Destroy;
+    finally
+      Disk := nil;
+    end;
+    Halt(0);
+  end;
 
   // Check for GUI mode: diskbender gui <dsk_path> OR diskbender <noun> <verb> [args]
   if (ParamCount >= 2) and (NormalizeNoun(ParamStr(1)) = 'gui') then
