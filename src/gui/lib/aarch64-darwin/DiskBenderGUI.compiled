@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CONFIG>
+  <Compiler Value="/opt/homebrew/bin/fpc" Date="1621030933"/>
+  <Params Value="-MObjFPC -Scghi -O1 -gw2 -godwarfsets -gl -k-ld_classic -k-weak_framework -kAppKit -k-weak_framework -kUserNotifications -l -vewnhibq -Fi/Users/ikari/src/cpc/DiskBender/src/gui/lib/aarch64-darwin -Fu/Users/ikari/src/cpc/DiskBender/src/gui/ -Fu/Users/ikari/src/cpc/DiskBender/src/units -Fu/Users/ikari/src/cpc/DiskBender/src -Fu/Users/ikari/src/lazarus/lcl/units/aarch64-darwin/cocoa -Fu/Users/ikari/src/lazarus/lcl/units/aarch64-darwin -Fu/Users/ikari/src/lazarus/components/freetype/lib/aarch64-darwin -Fu/Users/ikari/src/lazarus/components/lazutils/lib/aarch64-darwin -Fu/Users/ikari/src/lazarus/packager/units/aarch64-darwin -FU/Users/ikari/src/cpc/DiskBender/src/gui/lib/aarch64-darwin/ -FE/Users/ikari/src/cpc/DiskBender/ -o/Users/ikari/src/cpc/DiskBender/DiskBenderGUI -dLCL -dLCLcocoa DiskBenderGUI.lpr"/>
+</CONFIG>
