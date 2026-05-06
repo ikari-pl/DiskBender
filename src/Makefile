@@ -2,7 +2,7 @@
 # Builds a unified binary with CLI and TUI support
 
 CC=fpc
-OPTS=-O2 -Fuunits -Futui -Mobjfpc -Sh
+OPTS=-O2 -Fuunits -Futui -Mobjfpc -Sh -k-w
 SRC=DiskBender.pas
 BIN=../DiskBender
 

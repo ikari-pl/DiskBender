@@ -4,6 +4,11 @@ DiskBender_bin
 DiskBenderGUI
 DiskBenderTUI
 
+# Stray root-level build artifacts (from builds run outside src/)
+*.o
+*.ppu
+*.res
+
 # Free Pascal / Lazarus build artifacts
 *.o
 *.ppu
