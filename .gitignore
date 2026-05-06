@@ -3,6 +3,8 @@ DiskBender
 DiskBender_bin
 DiskBenderGUI
 DiskBenderTUI
+tests/keytest
+tests/test_tui
 
 # Stray root-level build artifacts (from builds run outside src/)
 *.o

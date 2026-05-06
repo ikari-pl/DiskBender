@@ -3,17 +3,19 @@ program DiskBender;
 {$mode objfpc}{$H+}
 
 uses
-  SysUtils, Classes, uDSK, uCPM, uInterfaces, uFormatters, CoreAPI, UIGui, uTUI_Custom in '../../src/tui/uTUI_Custom.pas';
+  SysUtils, Classes, uDSK, uCPM, uInterfaces, uFormatters, CoreAPI,
+  uVFS, uLocalLocation, uDSKLocation, uTerminalIO, uFPCTerminal, uTUIController;
 
 var
   Disk: IVirtualDisk;
   FS: IFilesystem;
   Format: TOutputFormat = ofTable;
   Noun, Verb, Target, DSKPath: string;
-  I, ArgIdx: Integer;
-  Map: TBytes;
-  LStream: TFileStream;
-  App: TDiskBenderTUI;
+  ArgIdx: Integer;
+  TUIInput: ITerminalInput;
+  TUIOutput: ITerminalOutput;
+  TUICtrl: TTUIController;
+  LeftCont, RightCont: IContainer;
 
 procedure Usage;
 begin
@@ -107,38 +109,32 @@ begin
     WriteLn(Result.Error);
 end;
 
-procedure HandleGuiCommands;
+procedure LaunchGui(const APath: string);
+var
+  AppPath: string;
 begin
-  Gui.SetDisk(Disk);
-  Gui.SetFilesystem(FS);
-  Gui.SetMode(gmMain);
-  Gui.Run;
+  AppPath := ExtractFilePath(ParamStr(0)) + 'DiskBenderGUI.app';
+  if not DirectoryExists(AppPath) then
+  begin
+    WriteLn('Error: GUI not found at ', AppPath);
+    WriteLn('Build it with: lazbuild src/gui/DiskBenderGUI.lpi');
+    Halt(1);
+  end;
+  ExecuteProcess('/usr/bin/open', [AppPath, '--args', APath]);
 end;
 
 begin
   if ParamCount = 0 then
   begin
-    WriteLn('DiskBender - Vintage Disk/Snapshot Management');
-    WriteLn;
-    Write('DSK path (or Enter for help): ');
-    ReadLn(DSKPath);
-    DSKPath := Trim(DSKPath);
-    if DSKPath = '' then
-      Usage;
-    if not FileExists(DSKPath) then
-    begin
-      WriteLn('Error: File not found: ', DSKPath);
-      Halt(1);
-    end;
-    DSKPath := ExpandFileName(DSKPath);
-    Disk := TDiskBenderDSK.Create(DSKPath);
+    TUIInput := TFPCTerminalInput.Create;
+    TUIOutput := TFPCTerminalOutput.Create;
+    LeftCont := TLocalContainer.Create(GetCurrentDir);
+    RightCont := TLocalContainer.Create(GetCurrentDir);
+    TUICtrl := TTUIController.Create(TUIInput, TUIOutput, LeftCont, RightCont);
     try
-      Disk.Load;
-      App := TDiskBenderTUI.Create(DSKPath, Disk);
-      App.Run;
-      App.Destroy;
+      TUICtrl.Run;
     finally
-      Disk := nil;
+      TUICtrl.Free;
     end;
     Halt(0);
   end;
@@ -146,30 +142,13 @@ begin
   // Check for GUI mode: diskbender gui <dsk_path> OR diskbender <noun> <verb> [args]
   if (ParamCount >= 2) and (NormalizeNoun(ParamStr(1)) = 'gui') then
     begin
-      // --- GUI MODE: diskbender gui <dsk_path> ---
-      DSKPath := ParamStr(2);
+      DSKPath := ExpandFileName(ParamStr(2));
       if not FileExists(DSKPath) then
       begin
         WriteLn('Error: File not found: ', DSKPath);
         Halt(1);
       end;
-      DSKPath := ExpandFileName(DSKPath);
-
-      Disk := TDiskBenderDSK.Create(DSKPath);
-      try
-        Disk.Load;
-        FS := TDiskBenderCPM.Create(Disk);
-        try
-          FS.ScanDirectory;
-          HandleGuiCommands;
-        finally
-          FS := nil;
-        end;
-      except
-        on E: Exception do
-          WriteLn('Error: ', E.Message);
-      end;
-      Disk := nil;
+      LaunchGui(DSKPath);
       Halt(0);
     end
     else if ParamCount >= 2 then
@@ -219,7 +198,6 @@ begin
         
           if Noun = 'files' then HandleFileCommands
           else if Noun = 'disk' then HandleDiskCommands
-          else if Noun = 'gui' then HandleGuiCommands
           else Usage;
         finally
           FS := nil;  { Release filesystem before disk }
@@ -233,14 +211,15 @@ begin
   else
     begin
       // --- TUI MODE: diskbender <dsk_path> ---
-      Disk := TDiskBenderDSK.Create(ParamStr(1));
+      TUIInput := TFPCTerminalInput.Create;
+      TUIOutput := TFPCTerminalOutput.Create;
+      LeftCont := TDSKContainer.Create(ParamStr(1));
+      RightCont := TLocalContainer.Create(GetCurrentDir);
+      TUICtrl := TTUIController.Create(TUIInput, TUIOutput, LeftCont, RightCont);
       try
-        Disk.Load;
-        App := TDiskBenderTUI.Create(ParamStr(1), Disk);
-        App.Run;
-        App.Destroy;
+        TUICtrl.Run;
       finally
-        Disk := nil;
+        TUICtrl.Free;
       end;
     end;
 end.

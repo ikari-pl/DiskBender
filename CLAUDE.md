@@ -1,99 +1,139 @@
-# DiskBender GUI - Development Notes
+# DiskBender - Development Notes
 
 ## What is DiskBender?
 
-A Lazarus LCL Cocoa GUI application for managing CPC DSK disk images with Norton Commander-style dual-panel file operations.
+A Free Pascal tool for managing Amstrad CPC DSK disk images. Three modes:
+
+- **TUI** — Norton Commander-style dual-pane terminal UI (default)
+- **CLI** — Scriptable command-line interface (`diskbender files list image.dsk`)
+- **GUI** — Lazarus LCL Cocoa app (separate binary)
 
 ## Build
 
+### TUI + CLI (single binary)
+
 ```bash
-cd /Users/ikari/src/cpc/DiskBender
+cd /Users/ikari/src/cpc/DiskBender/src && make
+```
+
+### GUI
+
+```bash
 ~/src/lazarus/lazbuild --lazarusdir=/Users/ikari/src/lazarus --compiler=/opt/homebrew/bin/fpc src/gui/DiskBenderGUI.lpi
+```
+
+### Tests
+
+```bash
+cd /Users/ikari/src/cpc/DiskBender && fpc -Fu./src/units -Fu./src/tui -Fu./src tests/test_tui.pas -otests/test_tui && ./tests/test_tui
 ```
 
 ## Run
 
 ```bash
-open /Users/ikari/src/cpc/DiskBender/DiskBenderGUI.app --args /path/to/image.dsk
+# TUI with DSK in left pane, local dir in right:
+./DiskBender path/to/image.dsk
+
+# TUI with local dirs in both panes (file browser):
+./DiskBender
+
+# CLI:
+./DiskBender files list image.dsk
+./DiskBender disk info image.dsk
+
+# GUI:
+./DiskBender gui image.dsk
+# or directly:
+open DiskBenderGUI.app --args /path/to/image.dsk
 ```
 
-## Kill
+## Architecture
 
-```bash
-pkill -f DiskBenderGUI
-```
+### VFS (Virtual File System) — capability-based model
 
-## Implemented Features
+Everything is an `IEntry`. Entries that contain children also implement `IContainer`.
+Capabilities are expressed as orthogonal interfaces checked at runtime via `Supports()`.
+The TUI never casts to concrete types — it discovers what an entry can do.
 
-### F-Key Operations (work on focused panel)
-- **F1 Help** - Shows help message
-- **F2 Rename** - Rename DSK file via `FFS.RenameFile()`; host shows message to use Finder
-- **F3 View** - Hex viewer for DSK files; host shows file info message
-- **F4 Edit** - Same as F3 View (hex editor placeholder)
-- **F5 Copy** - Copy between DSK and Host (based on focused pane)
-- **F6 Move** - Rename file on DSK; host shows message to use Finder
-- **F7 NewDir** - Shows "CP/M has no subdirectories" message
-- **F8 Delete** - Toggle delete flag on DSK files; host shows message
-- **F9 Menu** - Shows hint about left/right arrows to switch panels
-- **F10 Quit** - Exit application
+Core interfaces (in `uVFS.pas`):
 
-### Panel Operations
-- **Left/Right arrows** - Switch between DSK and Host panels
-- **Enter** - On DSK: enter "directory" (user area); On Host: open folder
-- **Column sorting** - Click header to sort (stub implemented)
-- **Drag & Drop** - Between panes (stub implemented)
+| Interface | Purpose |
+|---|---|
+| `IEntry` | Name + DisplayName — the fundamental unit |
+| `IContainer` | Holds child entries, navigable |
+| `ISizeable` | Has a size (bytes/KB/blocks) |
+| `ICopySource` | Content extractable to a stream |
+| `ICopyTarget` | Can receive/import an entry |
+| `IDeletable` | Can be deleted |
+| `IRestorable` | Can restore deleted entries |
+| `IRenameable` | Can be renamed |
+| `IWritable` | Can save/revert changes |
+| `IBlockMappable` | Has block-level allocation map |
+| `IAttributed` | Has metadata flags (R/O, System, Archive) |
+| `ISortable` | Entries can be reordered |
+| `ISummary` | Provides summary text |
+| `IPhysicalLayout` | Has physical geometry info |
+| `IUserArea` | Has a CP/M user number |
 
-### File Operations
-- **Copy to DSK** - Add host file to DSK via `FFS.AddFile()`
-- **Copy to Host** - Extract DSK file to host filesystem
-- **Undelete** - Restore first character of deleted file via `FFS.UndeleteFile()`
+### Terminal I/O abstraction
 
-### Backend (uCPM.pas)
-- `RenameFile(Idx: Integer; const NewName: string)`
-- `UndeleteFile(Idx: Integer)`
-- `AddFile(const HostPath: string): Boolean`
+`ITerminalInput` / `ITerminalOutput` interfaces decouple the TUI controller from
+FPC's Video/Keyboard units. This makes the controller fully testable with mock
+implementations (`TTestTerminalInput` / `TTestTerminalOutput`).
 
-## Recently Completed (Apr 2026 refactor pass)
+### TUI Controller
 
-- **Column sorting** - Click any header to sort; click again to flip direction.
-  DSK sort is delegated to `IFilesystem.SortFiles` (stable), host sort runs
-  in-memory over `FHostEntries`.
-- **Drag & Drop between panes** - Drop a host file on DSK to copy, drop a DSK
-  file on Host to extract.
-- **Hex viewer** - Dedicated modal `ShowHexViewer` in `uViewers` with a real
-  `TMemo` (scrollable, fixed-width font) instead of `ShowMessage`.
-- **Disk map** - Paint-box colour grid via `uViewers.ShowDiskMap` with legend.
-- **Disk info** - Scrollable text modal via `uViewers.ShowTextViewer`.
-- **Host details panel** - `LabelDetails` updated on select via
-  `ListViewHost.OnSelectItem`.
-- **F-key shortcuts** - Wired centrally via `FormKeyDownHandler` with
-  `KeyPreview=True`; no LFM hand-editing required.
-- **Row metadata** - Parallel `FDSKRowTags` / `FHostRowTags` arrays of
-  `TRowTag` replace `Pointer(PtrInt())` smuggling in `TListItem.Data`.
-- **Reference counting** - `TCPMFile` is a plain `TObject` owned by a
-  `TFPGObjectList`; `TCPMFileView` (`TInterfacedObject`) wraps it for the
-  `IVirtualFile` surface. No more `TNonRefCountedObject` hack.
-- **Shared types unit** - `uCPMTypes.pas` owns `TCPMFileName` (advanced
-  record), `TRowTag`, `TCPMAttr` and the magic constants.
+`TTUIController` is a pure-logic class that depends only on `uTerminalIO` and `uVFS`.
+It has no `uses Keyboard, Video`. Navigation uses a per-pane history stack (Backspace
+pops back). Enter on any `IContainer` pushes and navigates in. All actions check
+capabilities via `Supports()`.
 
-## Still Missing / TODO Features
+## TUI Key Bindings
 
-1. **File icons** - `SetupFileIcons`, `GetIconIndexForExt`, `GetIconIndexForHostItem` are stubs (no icons)
-2. **F5 Copy** - Basic implementation, needs progress indicator for large files
-3. **User area navigation** - CP/M has no dirs but user areas (0-15) need proper UI
-4. **Menu accelerators** - Menu items could use more keyboard shortcuts
-5. **Hex viewer search** - Hex dump is scrollable but has no Find/Goto
-6. **Hex editor (F4)** - Currently same as F3 View; real edit-and-write-back not implemented
-7. **Smoke-test** - End-to-end test with a real DSK image
+| Key | Action |
+|---|---|
+| Up/Down, W/S | Navigate entries |
+| Enter | Open container (dir, .dsk) |
+| Backspace | Go back (history stack) |
+| Tab | Switch pane focus |
+| F2 | Save modified DSK |
+| F3 | Toggle block allocation map |
+| F5 | Copy between panes |
+| F6 | Rename (DSK entries) |
+| F8 | Delete / Undelete |
+| F9 | Revert DSK changes |
+| Esc, F10, Q | Exit |
 
 ## Key Files
 
-- `src/gui/uMainForm.pas` - Main form, F-key handlers, sort, drag&drop
-- `src/gui/uMainForm.lfm` - Form layout (Lazarus designer)
-- `src/gui/uViewers.pas` - Programmatic hex/text/disk-map modal dialogs
-- `src/units/uCPM.pas` - CP/M filesystem implementation (`TCPMFile` + `TCPMFileView`)
-- `src/units/uInterfaces.pas` - `IFilesystem` / `IVirtualFile` / `IVirtualDisk`
-- `src/units/uCPMTypes.pas` - Shared CP/M constants, `TCPMFileName`, `TRowTag`
+### VFS + Locations
+- `src/units/uVFS.pas` — All VFS interfaces and shared types
+- `src/units/uLocalLocation.pas` — Host filesystem: `TLocalContainer`, `TLocalDirEntry`, `TLocalFileEntry`
+- `src/units/uDSKLocation.pas` — DSK images: `TDSKContainer`, `TCPMFileEntry`
+
+### TUI
+- `src/tui/uTerminalIO.pas` — `ITerminalInput`, `ITerminalOutput`, `TKeyAction`
+- `src/tui/uFPCTerminal.pas` — Real terminal implementation (FPC Video + Keyboard)
+- `src/tui/uTUIController.pas` — Pure-logic TUI controller
+
+### Backend
+- `src/units/uDSK.pas` — Low-level DSK image I/O
+- `src/units/uCPM.pas` — CP/M filesystem (`TCPMFile` + `TCPMFileView`)
+- `src/units/uCPMTypes.pas` — Shared CP/M constants, `TCPMFileName`, `TRowTag`
+- `src/units/uInterfaces.pas` — `IFilesystem` / `IVirtualFile` / `IVirtualDisk` (used by uDSK/uCPM and GUI)
+- `src/CoreAPI.pas` — CLI command dispatch
+
+### GUI (separate binary)
+- `src/gui/uMainForm.pas` — Main form, F-key handlers, sort, drag&drop
+- `src/gui/uViewers.pas` — Hex/text/disk-map modal dialogs
+
+### Tests
+- `tests/test_tui.pas` — 24 TUI controller tests
+- `tests/uTestTerminal.pas` — Mock terminal (scripted key queue, virtual screen buffer)
+- `tests/uTestLocation.pas` — Mock VFS containers and entries
+
+### Entry point
+- `src/DiskBender.pas` — Mode dispatch: no args → TUI file browser, one arg → TUI with DSK, `gui <path>` → launches GUI app, `<noun> <verb>` → CLI
 
 ## CP/M Notes
 
@@ -101,3 +141,22 @@ pkill -f DiskBenderGUI
 - Filenames: 8 chars + 3 char extension
 - Files with `?` in first byte are deleted
 - User number is stored in directory entry (not in filename)
+- Max file size for import: 64 KB (CP/M constraint)
+
+## GUI-Specific Features (Apr 2026)
+
+- Column sorting — click header to sort/flip direction
+- Drag & drop between panes
+- Hex viewer — scrollable `TMemo` modal
+- Disk map — paint-box colour grid with legend
+- Disk info — scrollable text modal
+- F-key shortcuts via `FormKeyDownHandler` with `KeyPreview=True`
+
+## TODO
+
+1. **GUI: File icons** — icon stubs not implemented
+2. **GUI: F5 Copy progress** — needs indicator for large files
+3. **TUI: User area navigation** — user areas 0-15 need proper UI
+4. **TUI: Hex viewer (F3 on file)** — not yet wired
+5. **GUI: Hex editor (F4)** — read-only, no write-back
+6. **End-to-end smoke test** — with a real DSK image
