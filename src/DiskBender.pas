@@ -19,12 +19,14 @@ procedure Usage;
 begin
   WriteLn('DiskBender - Vintage Disk/Snapshot Management');
   WriteLn;
-  WriteLn('Usage: diskbender <noun> <verb> [args] [dsk_path] [-o format]');
+  WriteLn('Usage:');
+  WriteLn('  diskbender <dsk_path>                          TUI (interactive)');
+  WriteLn('  diskbender <noun> <verb> [args] <dsk_path>    CLI');
+  WriteLn('  diskbender gui <dsk_path>                      GUI (Lazarus LCL)');
   WriteLn;
   WriteLn('Nouns:');
   WriteLn('  file(s)  <list|get|delete|undelete> [filename] <dsk_path>');
   WriteLn('  disk(s)  <info|map> <dsk_path>');
-  WriteLn('  gui      Launch GUI (requires Lazarus LCL)');
   WriteLn;
   WriteLn('Options:');
   WriteLn('  -o <table|json>   Output format (default: table)');
@@ -114,11 +116,11 @@ begin
 end;
 
 begin
-  // Main dispatcher: Check if we're running in CLI mode (with arguments) or TUI mode (no/generic args)
-  if ParamCount > 0 then
-  begin
-    // Check for GUI mode: diskbender gui <dsk_path> OR diskbender <noun> <verb> [args]
-    if (ParamCount >= 2) and (NormalizeNoun(ParamStr(1)) = 'gui') then
+  if ParamCount = 0 then
+    Usage;
+
+  // Check for GUI mode: diskbender gui <dsk_path> OR diskbender <noun> <verb> [args]
+  if (ParamCount >= 2) and (NormalizeNoun(ParamStr(1)) = 'gui') then
     begin
       // --- GUI MODE: diskbender gui <dsk_path> ---
       DSKPath := ParamStr(2);
@@ -204,29 +206,9 @@ begin
       end;
       Disk := nil;
     end
-else
+  else
     begin
-      // --- TUI MODE: Launch the interactive interface ---
-      if ParamCount < 1 then
-      begin
-        WriteLn('DiskBender - Vintage Disk/Snapshot Management');
-        WriteLn;
-        WriteLn('Usage:');
-        WriteLn('  CLI Mode:  diskbender <noun> <verb> [args] [dsk_path] [-o format]');
-        WriteLn('  TUI Mode:  diskbender <dsk_path>');
-        WriteLn('  GUI Mode:  diskbender gui <dsk_path>');
-        WriteLn;
-        WriteLn('Nouns:');
-        WriteLn('  file(s)  <list|get|delete|undelete> [filename] <dsk_path>');
-        WriteLn('  disk(s)  <info|map> <dsk_path>');
-        WriteLn('  gui      Launch GUI (requires Lazarus LCL)');
-        WriteLn;
-        WriteLn('Options:');
-        WriteLn('  -o <table|json>   Output format (default: table)');
-        Halt(1);
-      end;
-    
-      // Initialize and run the TUI application
+      // --- TUI MODE: diskbender <dsk_path> ---
       Disk := TDiskBenderDSK.Create(ParamStr(1));
       try
         Disk.Load;
@@ -237,5 +219,4 @@ else
         Disk := nil;
       end;
     end;
-  end;
 end.
