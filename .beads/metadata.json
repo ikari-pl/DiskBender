@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "DiskBender",
+  "project_id": "10dd5a43-07e3-459f-bdab-2ada75022270"
+}

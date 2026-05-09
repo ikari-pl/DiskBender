@@ -160,3 +160,54 @@ capabilities via `Supports()`.
 4. **TUI: Hex viewer (F3 on file)** — not yet wired
 5. **GUI: Hex editor (F4)** — read-only, no write-back
 6. **End-to-end smoke test** — with a real DSK image
+7. **TUI: View mode switching** — Brief (name only) / Full (name+size+date) panel modes; `TViewMode` enum and `FViewMode` state already stubbed in `uTUIController.pas`
+8. **TUI: Directory size calculation** — recursive size for local dirs, shown in Full view mode; may need an async/background approach for large trees
+9. ~~**TUI: Date column**~~ — Done. Local entries implement `IDated` (mtime + birthtime on Darwin via `fpstat`). `FormatEntry` shows NC-style 12-char date column. `FDateKind` per pane tracks which date kind to display.
+10. ~~**TUI: Context-aware sort dialog**~~ — Done. `RunSortDialog` dynamically probes first entry for `IUserArea`/`IDated` to build option list. Local dirs get Modified/Created, DSK gets User.
+
+<!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->
+## Beads Issue Tracker
+
+This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and commands.
+
+### Quick Reference
+
+```bash
+bd ready              # Find available work
+bd show <id>          # View issue details
+bd update <id> --claim  # Claim work
+bd close <id>         # Complete work
+```
+
+### Rules
+
+- Use `bd` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
+- Run `bd prime` for detailed command reference and session close protocol
+- Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
+
+## Session Completion
+
+**When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
+
+**MANDATORY WORKFLOW:**
+
+1. **File issues for remaining work** - Create issues for anything that needs follow-up
+2. **Run quality gates** (if code changed) - Tests, linters, builds
+3. **Update issue status** - Close finished work, update in-progress items
+4. **PUSH TO REMOTE** - This is MANDATORY:
+   ```bash
+   git pull --rebase
+   bd dolt push
+   git push
+   git status  # MUST show "up to date with origin"
+   ```
+5. **Clean up** - Clear stashes, prune remote branches
+6. **Verify** - All changes committed AND pushed
+7. **Hand off** - Provide context for next session
+
+**CRITICAL RULES:**
+- Work is NOT complete until `git push` succeeds
+- NEVER stop before pushing - that leaves work stranded locally
+- NEVER say "ready to push when you are" - YOU must push
+- If push fails, resolve and retry until it succeeds
+<!-- END BEADS INTEGRATION -->
