@@ -28,6 +28,10 @@ cd /Users/ikari/src/cpc/DiskBender/src && make
 cd /Users/ikari/src/cpc/DiskBender && fpc -Fu./src/units -Fu./src/tui -Fu./src tests/test_tui.pas -otests/test_tui && ./tests/test_tui
 ```
 
+```bash
+cd /Users/ikari/src/cpc/DiskBender && fpc -Fu./src/units -Fu./src/tui -Fu./src -Fu./tests tests/test_cpm_write.pas -otests/test_cpm_write && ./tests/test_cpm_write
+```
+
 ## Run
 
 ```bash
@@ -39,12 +43,23 @@ cd /Users/ikari/src/cpc/DiskBender && fpc -Fu./src/units -Fu./src/tui -Fu./src t
 
 # CLI:
 ./DiskBender files list image.dsk
+./DiskBender files get HELLO.BAS image.dsk
+./DiskBender files get --stdout HELLO.BAS image.dsk
+./DiskBender files add myfile.bas image.dsk
+./DiskBender files rename OLD.BAS NEW.BAS image.dsk
 ./DiskBender disk info image.dsk
+./DiskBender disk map image.dsk
+./DiskBender disk sectormap image.dsk
 
 # GUI:
 ./DiskBender gui image.dsk
 # or directly:
 open DiskBenderGUI.app --args /path/to/image.dsk
+
+# Greaseweazle (requires gw on PATH or DISKBENDER_GW set):
+./DiskBender gw read --drive a out.dsk
+./DiskBender gw write --drive a image.dsk
+./DiskBender gw write --drive a --yes image.dsk   # skip confirmation
 ```
 
 ## Architecture
@@ -75,6 +90,31 @@ Core interfaces (in `uVFS.pas`):
 | `IPhysicalLayout` | Has physical geometry info |
 | `IUserArea` | Has a CP/M user number |
 
+### Object lifetime convention (IMPORTANT)
+
+`TDiskBenderDSK` and `TDiskBenderCPM` extend `TInterfacedObject`, so they
+auto-destroy when their interface refcount hits zero.
+
+**Rule**: hold these only via interface refs (`IVirtualDisk`, `IFilesystem`).
+Never declare a local or field as `: TDiskBenderDSK` / `: TDiskBenderCPM` and
+never call `Free` on one. Construct them via the interface assignment idiom:
+
+```pascal
+var Disk: IVirtualDisk;
+Disk := TDiskBenderDSK.Create(Path);  { class -> interface, refcount = 1 }
+Disk.Load;
+{ ... use ... }
+Disk := nil;  { last ref drops, object freed automatically }
+```
+
+The previous failure mode: holding both a class ref (`Disk: TDiskBenderDSK`)
+and an interface ref to the same object meant the interface refcount could
+hit zero (auto-destroying the object) while the class ref still pointed at
+freed memory — a subsequent `Disk.Free` was a double-free.
+
+If you need a method only the concrete class has, **add it to the interface
+instead** (see `GetTrackInfo` in `IVirtualDisk` for the pattern).
+
 ### Terminal I/O abstraction
 
 `ITerminalInput` / `ITerminalOutput` interfaces decouple the TUI controller from
@@ -88,6 +128,14 @@ It has no `uses Keyboard, Video`. Navigation uses a per-pane history stack (Back
 pops back). Enter on any `IContainer` pushes and navigates in. All actions check
 capabilities via `Supports()`.
 
+**Test hook**: `TTUIController.RenderForTest` forces a single render tick without
+entering the input loop. Call it in tests after `HandleEvent` to inspect screen state.
+Production code never calls it.
+
+**Modifier state**: The field `FModifierState: Byte` tracks the current modifier
+key state (Shift/Ctrl/Alt). It is updated at the top of `HandleEvent` from
+`AEvent.Modifiers`. `DrawStatusBar` reads it to show modifier-aware F-key labels.
+
 ## TUI Key Bindings
 
 | Key | Action |
@@ -97,7 +145,7 @@ capabilities via `Supports()`.
 | Backspace | Go back (history stack) |
 | Tab | Switch pane focus |
 | F2 | Save modified DSK |
-| F3 | Toggle block allocation map |
+| F3 | Toggle block allocation map (on container); open hex viewer (on file/ICopySource entry) |
 | F5 | Copy between panes |
 | F6 | Rename (DSK entries) |
 | F8 | Delete / Undelete |
@@ -121,6 +169,7 @@ capabilities via `Supports()`.
 - `src/units/uCPM.pas` — CP/M filesystem (`TCPMFile` + `TCPMFileView`)
 - `src/units/uCPMTypes.pas` — Shared CP/M constants, `TCPMFileName`, `TRowTag`
 - `src/units/uInterfaces.pas` — `IFilesystem` / `IVirtualFile` / `IVirtualDisk` (used by uDSK/uCPM and GUI)
+- `src/units/uExternalDrive.pas` — Greaseweazle integration (`FindGwExecutable`, `RunGw`, `TGwReadResult`)
 - `src/CoreAPI.pas` — CLI command dispatch
 
 ### GUI (separate binary)
@@ -128,9 +177,11 @@ capabilities via `Supports()`.
 - `src/gui/uViewers.pas` — Hex/text/disk-map modal dialogs
 
 ### Tests
-- `tests/test_tui.pas` — 24 TUI controller tests
+- `tests/test_tui.pas` — 183 TUI controller tests
+- `tests/test_cpm_write.pas` — CP/M write-path tests (round-trip, multi-extent, 16-bit alloc, skew)
 - `tests/uTestTerminal.pas` — Mock terminal (scripted key queue, virtual screen buffer)
-- `tests/uTestLocation.pas` — Mock VFS containers and entries
+- `tests/uTestLocation.pas` — Mock VFS containers and entries (including `TTestHeteroSectorContainer`)
+- `tests/uTestVirtualDisk.pas` — Mock `IVirtualDisk` (`TMockVirtualDisk`, `TMockSkewedDisk`)
 
 ### Entry point
 - `src/DiskBender.pas` — Mode dispatch: no args → TUI file browser, one arg → TUI with DSK, `gui <path>` → launches GUI app, `<noun> <verb>` → CLI
@@ -142,6 +193,32 @@ capabilities via `Supports()`.
 - Files with `?` in first byte are deleted
 - User number is stored in directory entry (not in filename)
 - Max file size for import: 64 KB (CP/M constraint)
+- **GUARD entries**: directory entries whose filename bytes are all spaces (`$20`)
+  are used by CPC copy-protection schemes to pre-allocate blocks without creating
+  real files. `ScanDirectory` recognises them and names them `[GUARD#00]`, `[GUARD#01]`,
+  etc. (unique per disk scan). Their block allocations are counted as code-2 (live)
+  in `GetBlockMap` — `AddFile` cannot reuse those blocks.
+- **Bracket convention** (deliberately the inverse of Norton Commander): directories
+  display as `<NAME>` (angle brackets, e.g. `TLocalDirEntry.GetDisplayName`), while the
+  `[GUARD#nn]` pseudo-entries use `[square]` brackets. The `..` parent entry stays bare.
+- **Sorted sector IDs**: `IVirtualDisk.GetSortedSectorIDs(TrackIdx)` returns a
+  per-track ascending-sorted copy of sector IDs, cached after first call. The CP/M
+  layer uses this to map logical sector indices to physical SectorIDs on skewed disks.
+
+## Build Troubleshooting
+
+**Stale .ppu files**: FPC caches compiled units as `.ppu` files alongside their `.pas` sources. If you see mysterious "identifier not found", "unit not found", or type-mismatch errors after editing an interface, delete the stale `.ppu` (and the paired `.o`) and rebuild:
+
+```bash
+find /Users/ikari/src/cpc/DiskBender/src -name "*.ppu" -o -name "*.o" | xargs rm -f
+cd /Users/ikari/src/cpc/DiskBender/src && make
+```
+
+The test builds compile directly from source with `-Fu` flags so they are not affected, but the main `make` build reuses cached PPUs.
+
+## Environment Variables
+
+- `DISKBENDER_GW` — override path to the `gw` (Greaseweazle) executable. If set, `FindGwExecutable` trusts this value **without PATH-searching or existence checking**. Only set it in tests or when the system `gw` binary is not on PATH. In production, leave unset so the normal PATH search runs.
 
 ## GUI-Specific Features (Apr 2026)
 
@@ -157,10 +234,10 @@ capabilities via `Supports()`.
 1. **GUI: File icons** — icon stubs not implemented
 2. **GUI: F5 Copy progress** — needs indicator for large files
 3. **TUI: User area navigation** — user areas 0-15 need proper UI
-4. **TUI: Hex viewer (F3 on file)** — not yet wired
+4. ~~**TUI: Hex viewer (F3 on file)**~~ — Done. F3 on a file (entry implements ICopySource, not IContainer) opens a hex-dump modal (tmHex); Esc/F10/Q close it. See uTUIController.pas DrawHex/EnterHexMode.
 5. **GUI: Hex editor (F4)** — read-only, no write-back
 6. **End-to-end smoke test** — with a real DSK image
-7. **TUI: View mode switching** — Brief (name only) / Full (name+size+date) panel modes; `TViewMode` enum and `FViewMode` state already stubbed in `uTUIController.pas`
+7. **TUI: View mode switching** — Brief (name only) / Full (name+size+date) panel modes. The dead `TViewMode` enum and `FViewMode` field were removed (dead code cleanup); see beads for tracking.
 8. **TUI: Directory size calculation** — recursive size for local dirs, shown in Full view mode; may need an async/background approach for large trees
 9. ~~**TUI: Date column**~~ — Done. Local entries implement `IDated` (mtime + birthtime on Darwin via `fpstat`). `FormatEntry` shows NC-style 12-char date column. `FDateKind` per pane tracks which date kind to display.
 10. ~~**TUI: Context-aware sort dialog**~~ — Done. `RunSortDialog` dynamically probes first entry for `IUserArea`/`IDated` to build option list. Local dirs get Modified/Created, DSK gets User.
