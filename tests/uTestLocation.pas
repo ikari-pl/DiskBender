@@ -27,6 +27,21 @@ type
     procedure Restore;
   end;
 
+  TTestRenameableEntry = class(TInterfacedObject, IEntry, ISizeable, ICopySource,
+                               IRenameable)
+  strict private
+    FName: string;
+    FSize: Int64;
+  public
+    constructor Create(const AName: string; ASize: Int64);
+    function GetName: string;
+    function GetDisplayName: string;
+    function GetSize: Int64;
+    function GetSizeUnit: TSizeUnit;
+    procedure CopyTo(AStream: TStream);
+    procedure Rename(const NewName: string);
+  end;
+
   TTestDirEntry = class(TInterfacedObject, IEntry, IContainer)
   strict private
     FName: string;
@@ -55,6 +70,197 @@ type
     procedure Refresh;
     function Import(ASource: ICopySource; const AName: string): Boolean;
     procedure AddEntry(AEntry: IEntry);
+  end;
+
+  TTestSortableContainer = class(TInterfacedObject, IEntry, IContainer, ISortable)
+  strict private
+    FTitle: string;
+    FEntries: array of IEntry;
+    FSorted: Boolean;
+    FLastSortField: TSortField;
+    FLastDirsFirst: Boolean;
+  public
+    constructor Create(const ATitle: string; const AEntries: array of IEntry);
+    function GetName: string;
+    function GetDisplayName: string;
+    function GetEntryCount: Integer;
+    function GetEntry(Index: Integer): IEntry;
+    function GetTitle: string;
+    procedure Refresh;
+    procedure Sort(AField: TSortField; Ascending: Boolean; DirsFirst: Boolean);
+    property Sorted: Boolean read FSorted;
+    property LastSortField: TSortField read FLastSortField;
+    property LastDirsFirst: Boolean read FLastDirsFirst;
+  end;
+
+  TTestWritableContainer = class(TInterfacedObject, IEntry, IContainer, IWritable,
+                                 ICopyTarget)
+  strict private
+    FTitle: string;
+    FEntries: array of IEntry;
+    FModified: Boolean;
+    FSaveCalled: Boolean;
+    FRevertCalled: Boolean;
+  public
+    constructor Create(const ATitle: string; const AEntries: array of IEntry);
+    function GetName: string;
+    function GetDisplayName: string;
+    function GetEntryCount: Integer;
+    function GetEntry(Index: Integer): IEntry;
+    function GetTitle: string;
+    procedure Refresh;
+    function GetModified: Boolean;
+    procedure Save;
+    procedure Revert;
+    function Import(ASource: ICopySource; const AName: string): Boolean;
+    procedure SetModified(AValue: Boolean);
+    property SaveCalled: Boolean read FSaveCalled;
+    property RevertCalled: Boolean read FRevertCalled;
+  end;
+
+  TTestFullContainer = class(TInterfacedObject, IEntry, IContainer, ISortable,
+                             IBlockMappable, IWritable, ISummary, ICopyTarget)
+  strict private
+    FTitle: string;
+    FEntries: array of IEntry;
+    FSorted: Boolean;
+    FLastSortField: TSortField;
+    FLastDirsFirst: Boolean;
+    FModified: Boolean;
+    FSaveCalled: Boolean;
+  public
+    constructor Create(const ATitle: string; const AEntries: array of IEntry);
+    function GetName: string;
+    function GetDisplayName: string;
+    function GetEntryCount: Integer;
+    function GetEntry(Index: Integer): IEntry;
+    function GetTitle: string;
+    procedure Refresh;
+    procedure Sort(AField: TSortField; Ascending: Boolean; DirsFirst: Boolean);
+    function GetBlockMap: TBytes;
+    function GetBlockCount: Integer;
+    function GetModified: Boolean;
+    procedure Save;
+    procedure Revert;
+    function GetSummaryInfo: string;
+    function Import(ASource: ICopySource; const AName: string): Boolean;
+    procedure SetModified(AValue: Boolean);
+    property Sorted: Boolean read FSorted;
+    property LastSortField: TSortField read FLastSortField;
+    property LastDirsFirst: Boolean read FLastDirsFirst;
+    property SaveCalled: Boolean read FSaveCalled;
+  end;
+
+  TTestDatedEntry = class(TInterfacedObject, IEntry, ISizeable, ICopySource, IDated)
+  strict private
+    FName: string;
+    FSize: Int64;
+    FModified: TDateTime;
+    FCreated: TDateTime;
+    FAvailDates: TDateKindSet;
+  public
+    constructor Create(const AName: string; ASize: Int64;
+                       AModified: TDateTime; ACreated: TDateTime = 0);
+    function GetName: string;
+    function GetDisplayName: string;
+    function GetSize: Int64;
+    function GetSizeUnit: TSizeUnit;
+    procedure CopyTo(AStream: TStream);
+    function GetAvailableDates: TDateKindSet;
+    function GetDate(AKind: TDateKind): TDateTime;
+  end;
+
+  TTestUserEntry = class(TInterfacedObject, IEntry, ISizeable, ICopySource, IUserArea)
+  strict private
+    FName: string;
+    FSize: Int64;
+    FUser: Byte;
+  public
+    constructor Create(const AName: string; ASize: Int64; AUser: Byte);
+    function GetName: string;
+    function GetDisplayName: string;
+    function GetSize: Int64;
+    function GetSizeUnit: TSizeUnit;
+    procedure CopyTo(AStream: TStream);
+    function GetUser: Byte;
+  end;
+
+  TTestSectorContainer = class(TInterfacedObject, IEntry, IContainer, ISortable,
+                               IBlockMappable, IWritable, ISummary, ICopyTarget,
+                               ISectorMappable)
+  strict private
+    FTitle: string;
+    FEntries: array of IEntry;
+    FSorted: Boolean;
+    FLastSortField: TSortField;
+    FModified: Boolean;
+  public
+    constructor Create(const ATitle: string; const AEntries: array of IEntry);
+    function GetName: string;
+    function GetDisplayName: string;
+    function GetEntryCount: Integer;
+    function GetEntry(Index: Integer): IEntry;
+    function GetTitle: string;
+    procedure Refresh;
+    procedure Sort(AField: TSortField; Ascending: Boolean; DirsFirst: Boolean);
+    function GetBlockMap: TBytes;
+    function GetBlockCount: Integer;
+    function GetModified: Boolean;
+    procedure Save;
+    procedure Revert;
+    function GetSummaryInfo: string;
+    function Import(ASource: ICopySource; const AName: string): Boolean;
+    function GetSectorMap: TTrackColumnArray;
+    property Sorted: Boolean read FSorted;
+    property LastSortField: TSortField read FLastSortField;
+  end;
+
+  { Sector container where tracks have different sector counts.
+    Track 0: 9 sectors (boot), Track 1: 5 sectors (data).
+    Used by TestSectorMapHeterogeneousLayout (I6). }
+  TTestHeteroSectorContainer = class(TInterfacedObject, IEntry, IContainer,
+                                     ISectorMappable)
+  strict private
+    FTitle: string;
+  public
+    constructor Create(const ATitle: string);
+    function GetName: string;
+    function GetDisplayName: string;
+    function GetEntryCount: Integer;
+    function GetEntry(Index: Integer): IEntry;
+    function GetTitle: string;
+    procedure Refresh;
+    function GetSectorMap: TTrackColumnArray;
+  end;
+
+  TTestExpandableEntry = class(TInterfacedObject, IEntry, ISizeable, ICopySource,
+                                IExpandable)
+  strict private
+    FName: string;
+    FSize: Int64;
+    FContainer: IContainer;
+  public
+    constructor Create(const AName: string; ASize: Int64; AContainer: IContainer);
+    function GetName: string;
+    function GetDisplayName: string;
+    function GetSize: Int64;
+    function GetSizeUnit: TSizeUnit;
+    procedure CopyTo(AStream: TStream);
+    function Expand: IContainer;
+  end;
+
+  { ICopySource whose CopyTo always raises — used to test TUI exception handling }
+  TTestThrowingEntry = class(TInterfacedObject, IEntry, ISizeable, ICopySource)
+  strict private
+    FName: string;
+    FSize: Int64;
+  public
+    constructor Create(const AName: string; ASize: Int64);
+    function GetName: string;
+    function GetDisplayName: string;
+    function GetSize: Int64;
+    function GetSizeUnit: TSizeUnit;
+    procedure CopyTo(AStream: TStream);
   end;
 
 implementation
@@ -114,6 +320,45 @@ begin
   FDeleted := False;
 end;
 
+{ ── TTestRenameableEntry ────────────────────────────────────── }
+
+constructor TTestRenameableEntry.Create(const AName: string; ASize: Int64);
+begin
+  inherited Create;
+  FName := AName;
+  FSize := ASize;
+end;
+
+function TTestRenameableEntry.GetName: string;
+begin
+  Result := FName;
+end;
+
+function TTestRenameableEntry.GetDisplayName: string;
+begin
+  Result := FName;
+end;
+
+function TTestRenameableEntry.GetSize: Int64;
+begin
+  Result := FSize;
+end;
+
+function TTestRenameableEntry.GetSizeUnit: TSizeUnit;
+begin
+  Result := suBytes;
+end;
+
+procedure TTestRenameableEntry.CopyTo(AStream: TStream);
+begin
+  { empty }
+end;
+
+procedure TTestRenameableEntry.Rename(const NewName: string);
+begin
+  FName := NewName;
+end;
+
 { ── TTestDirEntry ────────────────────────────────────────────── }
 
 constructor TTestDirEntry.Create(const AName: string; const AEntries: array of IEntry);
@@ -134,7 +379,7 @@ end;
 
 function TTestDirEntry.GetDisplayName: string;
 begin
-  Result := '[' + FName + ']';
+  Result := '<' + FName + '>';
 end;
 
 function TTestDirEntry.GetEntryCount: Integer;
@@ -223,6 +468,601 @@ procedure TTestContainer.AddEntry(AEntry: IEntry);
 begin
   SetLength(FEntries, Length(FEntries) + 1);
   FEntries[High(FEntries)] := AEntry;
+end;
+
+{ ── TTestSortableContainer ──────────────────────────────────── }
+
+constructor TTestSortableContainer.Create(const ATitle: string; const AEntries: array of IEntry);
+var
+  I: Integer;
+begin
+  inherited Create;
+  FTitle := ATitle;
+  SetLength(FEntries, Length(AEntries));
+  for I := 0 to High(AEntries) do
+    FEntries[I] := AEntries[I];
+  FSorted := False;
+end;
+
+function TTestSortableContainer.GetName: string;
+begin
+  Result := FTitle;
+end;
+
+function TTestSortableContainer.GetDisplayName: string;
+begin
+  Result := FTitle;
+end;
+
+function TTestSortableContainer.GetEntryCount: Integer;
+begin
+  Result := Length(FEntries);
+end;
+
+function TTestSortableContainer.GetEntry(Index: Integer): IEntry;
+begin
+  if (Index >= 0) and (Index < Length(FEntries)) then
+    Result := FEntries[Index]
+  else
+    Result := nil;
+end;
+
+function TTestSortableContainer.GetTitle: string;
+begin
+  Result := FTitle;
+end;
+
+procedure TTestSortableContainer.Refresh;
+begin
+  { Static in tests }
+end;
+
+procedure TTestSortableContainer.Sort(AField: TSortField; Ascending: Boolean; DirsFirst: Boolean);
+begin
+  FSorted := True;
+  FLastSortField := AField;
+  FLastDirsFirst := DirsFirst;
+end;
+
+{ ── TTestWritableContainer ──────────────────────────────────── }
+
+constructor TTestWritableContainer.Create(const ATitle: string; const AEntries: array of IEntry);
+var
+  I: Integer;
+begin
+  inherited Create;
+  FTitle := ATitle;
+  SetLength(FEntries, Length(AEntries));
+  for I := 0 to High(AEntries) do
+    FEntries[I] := AEntries[I];
+  FModified := False;
+  FSaveCalled := False;
+  FRevertCalled := False;
+end;
+
+function TTestWritableContainer.GetName: string;
+begin
+  Result := FTitle;
+end;
+
+function TTestWritableContainer.GetDisplayName: string;
+begin
+  Result := FTitle;
+end;
+
+function TTestWritableContainer.GetEntryCount: Integer;
+begin
+  Result := Length(FEntries);
+end;
+
+function TTestWritableContainer.GetEntry(Index: Integer): IEntry;
+begin
+  if (Index >= 0) and (Index < Length(FEntries)) then
+    Result := FEntries[Index]
+  else
+    Result := nil;
+end;
+
+function TTestWritableContainer.GetTitle: string;
+begin
+  Result := FTitle;
+end;
+
+procedure TTestWritableContainer.Refresh;
+begin
+  { Static in tests }
+end;
+
+function TTestWritableContainer.GetModified: Boolean;
+begin
+  Result := FModified;
+end;
+
+procedure TTestWritableContainer.Save;
+begin
+  FSaveCalled := True;
+  FModified := False;
+end;
+
+procedure TTestWritableContainer.Revert;
+begin
+  FRevertCalled := True;
+  FModified := False;
+end;
+
+function TTestWritableContainer.Import(ASource: ICopySource; const AName: string): Boolean;
+var
+  MS: TMemoryStream;
+begin
+  MS := TMemoryStream.Create;
+  try
+    ASource.CopyTo(MS);
+    Result := True;
+  finally
+    MS.Free;
+  end;
+end;
+
+procedure TTestWritableContainer.SetModified(AValue: Boolean);
+begin
+  FModified := AValue;
+end;
+
+{ ── TTestFullContainer ──────────────────────────────────────── }
+
+constructor TTestFullContainer.Create(const ATitle: string; const AEntries: array of IEntry);
+var
+  I: Integer;
+begin
+  inherited Create;
+  FTitle := ATitle;
+  SetLength(FEntries, Length(AEntries));
+  for I := 0 to High(AEntries) do
+    FEntries[I] := AEntries[I];
+  FSorted := False;
+  FModified := False;
+  FSaveCalled := False;
+end;
+
+function TTestFullContainer.GetName: string;
+begin
+  Result := FTitle;
+end;
+
+function TTestFullContainer.GetDisplayName: string;
+begin
+  Result := FTitle;
+end;
+
+function TTestFullContainer.GetEntryCount: Integer;
+begin
+  Result := Length(FEntries);
+end;
+
+function TTestFullContainer.GetEntry(Index: Integer): IEntry;
+begin
+  if (Index >= 0) and (Index < Length(FEntries)) then
+    Result := FEntries[Index]
+  else
+    Result := nil;
+end;
+
+function TTestFullContainer.GetTitle: string;
+begin
+  Result := FTitle;
+end;
+
+procedure TTestFullContainer.Refresh;
+begin
+  { Static in tests }
+end;
+
+procedure TTestFullContainer.Sort(AField: TSortField; Ascending: Boolean; DirsFirst: Boolean);
+begin
+  FSorted := True;
+  FLastSortField := AField;
+  FLastDirsFirst := DirsFirst;
+end;
+
+function TTestFullContainer.GetBlockMap: TBytes;
+var
+  I: Integer;
+begin
+  SetLength(Result, 16);
+  for I := 0 to 15 do
+    Result[I] := I mod 4;
+end;
+
+function TTestFullContainer.GetBlockCount: Integer;
+begin
+  Result := 16;
+end;
+
+function TTestFullContainer.GetModified: Boolean;
+begin
+  Result := FModified;
+end;
+
+procedure TTestFullContainer.Save;
+begin
+  FSaveCalled := True;
+  FModified := False;
+end;
+
+procedure TTestFullContainer.Revert;
+begin
+  FModified := False;
+end;
+
+function TTestFullContainer.GetSummaryInfo: string;
+begin
+  Result := 'Test disk: 40 tracks, 9 sectors';
+end;
+
+function TTestFullContainer.Import(ASource: ICopySource; const AName: string): Boolean;
+var
+  MS: TMemoryStream;
+begin
+  MS := TMemoryStream.Create;
+  try
+    ASource.CopyTo(MS);
+    Result := True;
+  finally
+    MS.Free;
+  end;
+end;
+
+procedure TTestFullContainer.SetModified(AValue: Boolean);
+begin
+  FModified := AValue;
+end;
+
+{ ── TTestDatedEntry ─────────────────────────────────────────── }
+
+constructor TTestDatedEntry.Create(const AName: string; ASize: Int64;
+                                   AModified: TDateTime; ACreated: TDateTime = 0);
+begin
+  inherited Create;
+  FName := AName;
+  FSize := ASize;
+  FModified := AModified;
+  FCreated := ACreated;
+  FAvailDates := [dkModification];
+  if ACreated <> 0 then
+    Include(FAvailDates, dkCreation);
+end;
+
+function TTestDatedEntry.GetName: string;
+begin
+  Result := FName;
+end;
+
+function TTestDatedEntry.GetDisplayName: string;
+begin
+  Result := FName;
+end;
+
+function TTestDatedEntry.GetSize: Int64;
+begin
+  Result := FSize;
+end;
+
+function TTestDatedEntry.GetSizeUnit: TSizeUnit;
+begin
+  Result := suBytes;
+end;
+
+procedure TTestDatedEntry.CopyTo(AStream: TStream);
+begin
+  { empty }
+end;
+
+function TTestDatedEntry.GetAvailableDates: TDateKindSet;
+begin
+  Result := FAvailDates;
+end;
+
+function TTestDatedEntry.GetDate(AKind: TDateKind): TDateTime;
+begin
+  case AKind of
+    dkCreation: Result := FCreated;
+    dkModification: Result := FModified;
+  else
+    Result := 0;
+  end;
+end;
+
+{ ── TTestUserEntry ──────────────────────────────────────────── }
+
+constructor TTestUserEntry.Create(const AName: string; ASize: Int64; AUser: Byte);
+begin
+  inherited Create;
+  FName := AName;
+  FSize := ASize;
+  FUser := AUser;
+end;
+
+function TTestUserEntry.GetName: string;
+begin
+  Result := FName;
+end;
+
+function TTestUserEntry.GetDisplayName: string;
+begin
+  Result := IntToStr(FUser) + ':' + FName;
+end;
+
+function TTestUserEntry.GetSize: Int64;
+begin
+  Result := FSize;
+end;
+
+function TTestUserEntry.GetSizeUnit: TSizeUnit;
+begin
+  Result := suBytes;
+end;
+
+procedure TTestUserEntry.CopyTo(AStream: TStream);
+begin
+  { empty }
+end;
+
+function TTestUserEntry.GetUser: Byte;
+begin
+  Result := FUser;
+end;
+
+{ ── TTestSectorContainer ────────────────────────────────────── }
+
+constructor TTestSectorContainer.Create(const ATitle: string; const AEntries: array of IEntry);
+var
+  I: Integer;
+begin
+  inherited Create;
+  FTitle := ATitle;
+  SetLength(FEntries, Length(AEntries));
+  for I := 0 to High(AEntries) do
+    FEntries[I] := AEntries[I];
+  FSorted := False;
+  FModified := False;
+end;
+
+function TTestSectorContainer.GetName: string;
+begin
+  Result := FTitle;
+end;
+
+function TTestSectorContainer.GetDisplayName: string;
+begin
+  Result := FTitle;
+end;
+
+function TTestSectorContainer.GetEntryCount: Integer;
+begin
+  Result := Length(FEntries);
+end;
+
+function TTestSectorContainer.GetEntry(Index: Integer): IEntry;
+begin
+  if (Index >= 0) and (Index < Length(FEntries)) then
+    Result := FEntries[Index]
+  else
+    Result := nil;
+end;
+
+function TTestSectorContainer.GetTitle: string;
+begin
+  Result := FTitle;
+end;
+
+procedure TTestSectorContainer.Refresh;
+begin
+end;
+
+procedure TTestSectorContainer.Sort(AField: TSortField; Ascending: Boolean; DirsFirst: Boolean);
+begin
+  FSorted := True;
+  FLastSortField := AField;
+end;
+
+function TTestSectorContainer.GetBlockMap: TBytes;
+var
+  I: Integer;
+begin
+  SetLength(Result, 16);
+  for I := 0 to 15 do
+    Result[I] := I mod 4;
+end;
+
+function TTestSectorContainer.GetBlockCount: Integer;
+begin
+  Result := 16;
+end;
+
+function TTestSectorContainer.GetModified: Boolean;
+begin
+  Result := FModified;
+end;
+
+procedure TTestSectorContainer.Save;
+begin
+  FModified := False;
+end;
+
+procedure TTestSectorContainer.Revert;
+begin
+  FModified := False;
+end;
+
+function TTestSectorContainer.GetSummaryInfo: string;
+begin
+  Result := 'Test: 3 tracks, 9 sectors';
+end;
+
+function TTestSectorContainer.Import(ASource: ICopySource; const AName: string): Boolean;
+var
+  MS: TMemoryStream;
+begin
+  MS := TMemoryStream.Create;
+  try
+    ASource.CopyTo(MS);
+    Result := True;
+  finally
+    MS.Free;
+  end;
+end;
+
+function TTestSectorContainer.GetSectorMap: TTrackColumnArray;
+var
+  I, J: Integer;
+begin
+  SetLength(Result, 3);
+  for I := 0 to 2 do
+  begin
+    Result[I].TrackNum := I;
+    Result[I].SideNum := 0;
+    Result[I].FillerByte := $E5;
+    SetLength(Result[I].Sectors, 9);
+    for J := 0 to 8 do
+    begin
+      Result[I].Sectors[J].SectorID := $C1 + J;
+      Result[I].Sectors[J].SizeBytes := 512;
+      Result[I].Sectors[J].FDCSt1 := 0;
+      Result[I].Sectors[J].FDCSt2 := 0;
+      if I = 0 then
+        Result[I].Sectors[J].State := ssBoot
+      else if (I = 1) and (J < 4) then
+        Result[I].Sectors[J].State := ssSystem
+      else
+        Result[I].Sectors[J].State := ssData;
+    end;
+  end;
+end;
+
+{ ── TTestHeteroSectorContainer ──────────────────────────────── }
+
+constructor TTestHeteroSectorContainer.Create(const ATitle: string);
+begin
+  inherited Create;
+  FTitle := ATitle;
+end;
+
+function TTestHeteroSectorContainer.GetName: string;        begin Result := FTitle; end;
+function TTestHeteroSectorContainer.GetDisplayName: string; begin Result := FTitle; end;
+function TTestHeteroSectorContainer.GetEntryCount: Integer; begin Result := 0; end;
+function TTestHeteroSectorContainer.GetEntry(Index: Integer): IEntry; begin Result := nil; end;
+function TTestHeteroSectorContainer.GetTitle: string;       begin Result := FTitle; end;
+procedure TTestHeteroSectorContainer.Refresh;               begin end;
+
+function TTestHeteroSectorContainer.GetSectorMap: TTrackColumnArray;
+var
+  J: Integer;
+begin
+  { Track 0: 9 sectors (boot), Track 1: 5 sectors (data).
+    The two tracks deliberately differ in sector count to exercise
+    DrawSectorMap's column-width handling across heterogeneous layouts. }
+  SetLength(Result, 2);
+
+  Result[0].TrackNum  := 0;
+  Result[0].SideNum   := 0;
+  Result[0].FillerByte := $E5;
+  SetLength(Result[0].Sectors, 9);
+  for J := 0 to 8 do
+  begin
+    Result[0].Sectors[J].SectorID  := $C1 + J;
+    Result[0].Sectors[J].SizeBytes := 512;
+    Result[0].Sectors[J].FDCSt1   := 0;
+    Result[0].Sectors[J].FDCSt2   := 0;
+    Result[0].Sectors[J].State    := ssBoot;
+  end;
+
+  Result[1].TrackNum  := 1;
+  Result[1].SideNum   := 0;
+  Result[1].FillerByte := $E5;
+  SetLength(Result[1].Sectors, 5);
+  for J := 0 to 4 do
+  begin
+    Result[1].Sectors[J].SectorID  := $01 + J;
+    Result[1].Sectors[J].SizeBytes := 1024;
+    Result[1].Sectors[J].FDCSt1   := 0;
+    Result[1].Sectors[J].FDCSt2   := 0;
+    Result[1].Sectors[J].State    := ssData;
+  end;
+end;
+
+{ ── TTestThrowingEntry ───────────────────────────────────────── }
+
+constructor TTestThrowingEntry.Create(const AName: string; ASize: Int64);
+begin
+  inherited Create;
+  FName := AName;
+  FSize := ASize;
+end;
+
+function TTestThrowingEntry.GetName: string;
+begin
+  Result := FName;
+end;
+
+function TTestThrowingEntry.GetDisplayName: string;
+begin
+  Result := FName;
+end;
+
+function TTestThrowingEntry.GetSize: Int64;
+begin
+  Result := FSize;
+end;
+
+function TTestThrowingEntry.GetSizeUnit: TSizeUnit;
+begin
+  Result := suBytes;
+end;
+
+procedure TTestThrowingEntry.CopyTo(AStream: TStream);
+begin
+  raise Exception.Create('Simulated read error');
+end;
+
+{ ── TTestExpandableEntry ─────────────────────────────────────── }
+
+constructor TTestExpandableEntry.Create(const AName: string; ASize: Int64;
+  AContainer: IContainer);
+begin
+  inherited Create;
+  FName := AName;
+  FSize := ASize;
+  FContainer := AContainer;
+end;
+
+function TTestExpandableEntry.GetName: string;
+begin
+  Result := FName;
+end;
+
+function TTestExpandableEntry.GetDisplayName: string;
+begin
+  Result := FName;
+end;
+
+function TTestExpandableEntry.GetSize: Int64;
+begin
+  Result := FSize;
+end;
+
+function TTestExpandableEntry.GetSizeUnit: TSizeUnit;
+begin
+  Result := suBytes;
+end;
+
+procedure TTestExpandableEntry.CopyTo(AStream: TStream);
+begin
+  { empty }
+end;
+
+function TTestExpandableEntry.Expand: IContainer;
+begin
+  Result := FContainer;
 end;
 
 end.
