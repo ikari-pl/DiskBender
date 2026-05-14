@@ -1,6 +1,7 @@
 unit uInterfaces;
 
 {$mode objfpc}{$H+}
+{$packrecords 1}
 
 interface
 
@@ -12,6 +13,34 @@ type
     ignore unsupported fields (e.g. a filesystem with no "user area" concept
     should no-op on fsUser). }
   TFileSortField = (fsName, fsExt, fsSize, fsUser);
+
+  { Sector Information Block (8 bytes each, inside a Track Info Block).
+    Lives here rather than in uDSK so IVirtualDisk can expose track geometry
+    without requiring callers to cast to the concrete TDiskBenderDSK class. }
+  TSectorInfo = packed record
+    Track: Byte;
+    Side: Byte;
+    SectorID: Byte;
+    SectorSize: Byte; { (128 << Size) bytes }
+    FDCStatus1: Byte;
+    FDCStatus2: Byte;
+    DataLength: Word; { Not used for Standard DSK }
+  end;
+
+  { Track Information Block (one per track) — describes physical geometry of
+    a single track including the sector ID list. }
+  TTrackInfoBlock = packed record
+    Signature: array[0..11] of Char; { "Track-Info\r\n" }
+    Reserved: array[0..3] of Byte;
+    TrackNum: Byte;
+    SideNum: Byte;
+    Reserved2: array[0..1] of Byte;
+    SectorSize: Byte;
+    NumSectors: Byte;
+    GAP3Length: Byte;
+    FillerByte: Byte;
+    SectorInfos: array[0..28] of TSectorInfo;
+  end;
 
   { Represents a raw disk or snapshot container }
   IVirtualDisk = interface
@@ -27,6 +56,16 @@ type
 
     function GetSectorData(TrackIdx, SectorIdx: Integer): TBytes;
     procedure PutSectorData(TrackIdx, SectorIdx: Integer; const Data: TBytes);
+
+    { Physical geometry of a single track. Required by filesystem drivers
+      to map block indices to (track, sector) and to discover sector size. }
+    function GetTrackInfo(TrackIdx: Integer): TTrackInfoBlock;
+
+    { Return the sector IDs for a track sorted ascending. The result is cached
+      per track and invalidated on Load/Revert/PutSectorData. Callers that need
+      sorted sector IDs (CP/M logical→physical mapping, sector-map painter)
+      should use this rather than sorting inline every call. }
+    function GetSortedSectorIDs(TrackIdx: Integer): TBytes;
 
     property NumTracks: Byte read GetNumTracks;
     property NumSides: Byte read GetNumSides;
@@ -48,6 +87,22 @@ type
     property SizeKB: Integer read GetSizeKB;
     property IsDeleted: Boolean read GetIsDeleted;
     property User: Byte read GetUser;
+  end;
+
+  { Disk Parameter Block — forward-declared here so IFilesystem can expose it
+    without callers having to cast to TDiskBenderCPM.  The full definition lives
+    in uCPM.pas; this is a structural copy so uInterfaces.pas stays self-contained. }
+  TCPMDPB = record
+    SPT: Word;
+    BSH: Byte;
+    BLM: Byte;
+    EXM: Byte;
+    DSM: Word;
+    DRM: Word;
+    AL0: Byte;
+    AL1: Byte;
+    CKS: Word;
+    OFF: Word;
   end;
 
   { Represents a filesystem (CP/M, Amsdos, etc.) }
@@ -72,6 +127,21 @@ type
     function GetBlockMap: TBytes;
 
     function GetSummaryInfo: string;
+
+    { Return the filesystem's Disk Parameter Block.  Avoids callers having to
+      cast IFilesystem to TDiskBenderCPM to read geometry. }
+    function GetDPB: TCPMDPB;
+
+    { Override the Disk Parameter Block — used by tests that need non-default
+      geometry without creating a subclass. }
+    procedure SetDPB(const Value: TCPMDPB);
+
+    { Per-file directory-entry location accessors.  Each logical file may span
+      multiple CP/M directory entries (extents); these allow callers to probe
+      the physical location of each entry without casting to TDiskBenderCPM. }
+    function GetFileEntryCount(FileIdx: Integer): Integer;
+    function GetFileEntryLoc(FileIdx, LocIdx: Integer;
+                              out ATrack, ASectorIdx, AEntryIdx: Byte): Boolean;
   end;
 
 implementation

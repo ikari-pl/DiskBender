@@ -6,7 +6,7 @@ unit uCPM;
 interface
 
 uses
-  Classes, SysUtils, uDSK, uInterfaces, uCPMTypes, fgl;
+  Classes, SysUtils, uInterfaces, uCPMTypes, fgl;
 
 type
   { CP/M Directory Entry (32 bytes) }
@@ -23,19 +23,11 @@ type
 
   TCPMDirEntryPtr = ^TCPMDirEntry;
 
-  { CP/M Disk Parameter Block (DPB) - defines geometry for a CP/M volume. }
-  TCPMDPB = record
-    SPT: Word;  { Sectors Per Track }
-    BSH: Byte;  { Block Shift (3=1KB, 4=2KB, ...) }
-    BLM: Byte;  { Block Mask (BSH=3 => BLM=7) }
-    EXM: Byte;  { Extent Mask }
-    DSM: Word;  { Total number of blocks - 1 }
-    DRM: Word;  { Total number of directory entries - 1 }
-    AL0: Byte;  { Allocation bits for directory }
-    AL1: Byte;
-    CKS: Word;  { Check sum size }
-    OFF: Word;  { Track offset (reserved tracks) }
-  end;
+  { CP/M Disk Parameter Block (DPB) - defines geometry for a CP/M volume.
+    The structural definition is shared with uInterfaces (TCPMDPB there);
+    this is the same record — they are assignment-compatible in FPC because
+    the field layout is identical. }
+  TCPMDPB = uInterfaces.TCPMDPB;
 
   { Location of a physical directory entry on disk. }
   TCPMEntryLoc = record
@@ -99,6 +91,22 @@ type
     function GetSectorByID(Track, SectorID: Byte): TBytes;
     function CleanString(const S: array of Char; Start, Count: Integer): string;
     function FindFreeDirEntry(out Track, SecIdx, EntryIdx: Integer): Boolean;
+
+    { Map a CP/M-logical sector index (0..NumSectors-1) at a given track to
+      the physical SectorID on disk. CP/M expects sector access in sorted
+      sector-ID order; the DSK stores sectors in skewed physical order, so
+      we must sort the track's IDs. Wraps for sub-functions below. }
+    function LogicalSectorID(Track, LogicalIdx: Integer): Integer;
+    function ReadLogicalSector(Track, LogicalIdx: Integer): TBytes;
+    procedure WriteLogicalSector(Track, LogicalIdx: Integer; const Data: TBytes);
+
+    { Block allocation width — derived from DPB.DSM. Volumes with > 255
+      blocks need 16-bit pointers (8 entries × 2 bytes per dir entry); else
+      8-bit (16 entries × 1 byte). }
+    function Is16BitAlloc: Boolean; inline;
+    function BlocksPerExtent: Integer; inline;
+    function GetAllocBlock(Entry: TCPMDirEntryPtr; SlotIdx: Integer): Word;
+    procedure SetAllocBlock(Entry: TCPMDirEntryPtr; SlotIdx: Integer; BlockIdx: Word);
   public
     { IFilesystem }
     procedure ScanDirectory;
@@ -112,6 +120,11 @@ type
     procedure SortFiles(Field: TFileSortField; Ascending: Boolean);
     function GetBlockMap: TBytes;
     function GetSummaryInfo: string;
+    function GetDPB: TCPMDPB;
+    procedure SetDPB(const Value: TCPMDPB);
+    function GetFileEntryCount(FileIdx: Integer): Integer;
+    function GetFileEntryLoc(FileIdx, LocIdx: Integer;
+                              out ATrack, ASectorIdx, AEntryIdx: Byte): Boolean;
 
     constructor Create(ADisk: IVirtualDisk);
     destructor Destroy; override;
@@ -257,7 +270,7 @@ var
   FirstID: Byte;
 begin
   if FDisk = nil then Exit;
-  TI := (FDisk as TDiskBenderDSK).GetTrackInfo(0);
+  TI := FDisk.GetTrackInfo(0);
   if TI.NumSectors = 0 then Exit;
 
   FirstID := TI.SectorInfos[0].SectorID;
@@ -296,32 +309,55 @@ end;
 
 procedure TDiskBenderCPM.ScanDirectory;
 var
-  S, E, I: Integer;
+  S, E, I, CurTrack, SecsConsumed: Integer;
   DirSector: TBytes;
   Entry: TCPMDirEntryPtr;
   FName, FExt: string;
   Attrs: TCPMAttrs;
-  IsEmpty: Boolean;
+  IsEmpty, IsAllSpace: Boolean;
   Found: Boolean;
   CFile: TCPMFile;
-  BaseID: Byte;
   TI: TTrackInfoBlock;
+  SectorSize, EntriesPerSec, TotalDirSecs: Integer;
+  GuardCount: Integer;   { sequential index for GUARD entries, makes names unique }
 begin
   FFiles.Clear;
   AutoDetectFormat;
+  GuardCount := 0;
 
-  TI := (FDisk as TDiskBenderDSK).GetTrackInfo(FDPB.OFF);
+  CurTrack := FDPB.OFF;
+  TI := FDisk.GetTrackInfo(CurTrack);
   if TI.NumSectors = 0 then Exit;
-  BaseID := TI.SectorInfos[0].SectorID;
+  SectorSize := 128 shl TI.SectorSize;
+  if SectorSize <= 0 then Exit;
+  EntriesPerSec := SectorSize div SizeOf(TCPMDirEntry);
+  if EntriesPerSec <= 0 then Exit;
+  TotalDirSecs := ((FDPB.DRM + 1) + EntriesPerSec - 1) div EntriesPerSec;
 
-  for S := 0 to (FDPB.DRM div (512 div 32)) do
+  S := 0;
+  SecsConsumed := 0;
+  while SecsConsumed < TotalDirSecs do
   begin
-    DirSector := GetSectorByID(FDPB.OFF, BaseID + S);
-    if DirSector = nil then Continue;
-
-    for E := 0 to (Length(DirSector) div 32) - 1 do
+    if S >= TI.NumSectors then
     begin
-      Entry := TCPMDirEntryPtr(@DirSector[E * 32]);
+      Inc(CurTrack);
+      TI := FDisk.GetTrackInfo(CurTrack);
+      if TI.NumSectors = 0 then Exit;
+      S := 0;
+    end;
+    { S is a CP/M-logical sector index (sorted-by-SectorID position).
+      ReadLogicalSector handles the skew translation to physical. }
+    DirSector := ReadLogicalSector(CurTrack, S);
+    if DirSector = nil then
+    begin
+      Inc(S);
+      Inc(SecsConsumed);
+      Continue;
+    end;
+
+    for E := 0 to EntriesPerSec - 1 do
+    begin
+      Entry := TCPMDirEntryPtr(@DirSector[E * SizeOf(TCPMDirEntry)]);
       if (Entry^.User > CPM_MAX_USER) and (Entry^.User <> CPM_DELETED_USER) then Continue;
 
       { Skip truly empty entries (all bytes $E5 = unused slot) }
@@ -340,7 +376,19 @@ begin
       FName := CleanString(Entry^.Filename, 0, CPM_NAME_LEN);
       FExt  := CleanString(Entry^.Extension, 0, CPM_EXT_LEN);
       Attrs := DecodeCPMAttrs(Entry^.Extension);
-      if (FName = '') or (FName = '........') or (FName = '.') then Continue;
+      if FName = '' then
+      begin
+        IsAllSpace := True;
+        for I := 0 to CPM_NAME_LEN - 1 do
+          if (Byte(Entry^.Filename[I]) and $7F) <> $20 then
+          begin IsAllSpace := False; Break; end;
+        if not IsAllSpace then Continue;
+        { [GUARD#nn] in square brackets; directories use <..> here, so the
+          two bracket styles stay visually distinct. }
+        FName := Format('[GUARD#%.2d]', [GuardCount]);   { %.Nd = zero-padded to N digits }
+        Inc(GuardCount);
+      end
+      else if (FName = '........') or (FName = '.') then Continue;
 
       { Multiple extents of the same file share name+ext — merge record counts. }
       Found := False;
@@ -351,7 +399,7 @@ begin
         begin
           CFile.TotalRecords := CFile.TotalRecords + Entry^.RecordCount;
           CFile.SizeKB := (CFile.TotalRecords + 7) div 8;
-          CFile.AddEntry(FDPB.OFF, S, E);
+          CFile.AddEntry(CurTrack, S, E);
           Found := True;
           Break;
         end;
@@ -362,10 +410,12 @@ begin
         CFile := TCPMFile.Create(Entry^.User, FName, FExt, Attrs);
         CFile.TotalRecords := Entry^.RecordCount;
         CFile.SizeKB := (CFile.TotalRecords + 7) div 8;
-        CFile.AddEntry(FDPB.OFF, S, E);
+        CFile.AddEntry(CurTrack, S, E);
         FFiles.Add(CFile);
       end;
     end;
+    Inc(S);
+    Inc(SecsConsumed);
   end;
 end;
 
@@ -386,12 +436,12 @@ begin
   for I := 0 to CFile.EntryCount - 1 do
   begin
     Loc := CFile.GetEntry(I);
-    SecData := FDisk.GetSectorData(Loc.Track, Loc.SectorIdx);
+    SecData := ReadLogicalSector(Loc.Track, Loc.SectorIdx);
     if SecData <> nil then
     begin
       Entry := TCPMDirEntryPtr(@SecData[Loc.EntryIdx * 32]);
       Entry^.User := NewUser;
-      FDisk.PutSectorData(Loc.Track, Loc.SectorIdx, SecData);
+      WriteLogicalSector(Loc.Track, Loc.SectorIdx, SecData);
     end;
   end;
 end;
@@ -399,51 +449,63 @@ end;
 procedure TDiskBenderCPM.GetFileContent(FileIdx: Integer; Stream: TStream);
 var
   CFile: TCPMFile;
-  DirSector: TBytes;
+  DirSector, Data: TBytes;
   Entry: TCPMDirEntryPtr;
   I, B, S: Integer;
   BlockIdx: Word;
-  SectorsPerBlock: Integer;
+  TI: TTrackInfoBlock;
+  SectorSize, SectorsPerBlock, PhysSPT, RecsPerSector: Integer;
   PhysTrack, PhysSecIdx: Integer;
-  Data: TBytes;
-  TotalRecsLeft: Integer;
+  TotalRecsLeft, BytesToWrite: Integer;
   Loc: TCPMEntryLoc;
 begin
   if (FileIdx < 0) or (FileIdx >= FFiles.Count) then Exit;
   CFile := FFiles[FileIdx];
   TotalRecsLeft := CFile.TotalRecords;
 
-  SectorsPerBlock := (128 shl FDPB.BSH) div 512;
+  { Derive all geometry from the actual track info, not from constants.
+    Sample track FDPB.OFF since that's where data sectors start; we assume
+    uniform geometry across data tracks (which is true for CPC + PCW). }
+  TI := FDisk.GetTrackInfo(FDPB.OFF);
+  if TI.NumSectors = 0 then Exit;
+  SectorSize := 128 shl TI.SectorSize;
+  if SectorSize <= 0 then Exit;
+  SectorsPerBlock := (128 shl FDPB.BSH) div SectorSize;
+  if SectorsPerBlock <= 0 then SectorsPerBlock := 1;
+  PhysSPT := TI.NumSectors;
+  RecsPerSector := SectorSize div 128;
 
   for I := 0 to CFile.EntryCount - 1 do
   begin
     Loc := CFile.GetEntry(I);
-    DirSector := FDisk.GetSectorData(Loc.Track, Loc.SectorIdx);
+    DirSector := ReadLogicalSector(Loc.Track, Loc.SectorIdx);
     if DirSector = nil then Continue;
 
-    Entry := TCPMDirEntryPtr(@DirSector[Loc.EntryIdx * 32]);
+    Entry := TCPMDirEntryPtr(@DirSector[Loc.EntryIdx * SizeOf(TCPMDirEntry)]);
 
-    for B := 0 to 15 do
+    for B := 0 to BlocksPerExtent - 1 do
     begin
-      BlockIdx := Entry^.Allocations[B];
+      BlockIdx := GetAllocBlock(Entry, B);
       if BlockIdx = 0 then Continue;
 
       for S := 0 to SectorsPerBlock - 1 do
       begin
-        PhysTrack  := FDPB.OFF + ((BlockIdx * SectorsPerBlock + S) div (FDPB.SPT div 4));
-        PhysSecIdx := (BlockIdx * SectorsPerBlock + S) mod (FDPB.SPT div 4);
+        PhysTrack  := FDPB.OFF + ((BlockIdx * SectorsPerBlock + S) div PhysSPT);
+        PhysSecIdx := (BlockIdx * SectorsPerBlock + S) mod PhysSPT;
 
-        Data := FDisk.GetSectorData(PhysTrack, PhysSecIdx);
+        Data := ReadLogicalSector(PhysTrack, PhysSecIdx);
         if Data <> nil then
         begin
-          if TotalRecsLeft >= 4 then
+          if TotalRecsLeft >= RecsPerSector then
           begin
-            Stream.WriteBuffer(Data[0], 512);
-            Dec(TotalRecsLeft, 4);
+            Stream.WriteBuffer(Data[0], SectorSize);
+            Dec(TotalRecsLeft, RecsPerSector);
           end
           else if TotalRecsLeft > 0 then
           begin
-            Stream.WriteBuffer(Data[0], TotalRecsLeft * 128);
+            BytesToWrite := TotalRecsLeft * 128;
+            if BytesToWrite > Length(Data) then BytesToWrite := Length(Data);
+            Stream.WriteBuffer(Data[0], BytesToWrite);
             TotalRecsLeft := 0;
           end;
         end;
@@ -457,10 +519,10 @@ var
   I, B, S, E: Integer;
   DirSector: TBytes;
   Entry: TCPMDirEntryPtr;
-  BaseID: Byte;
   TI: TTrackInfoBlock;
   BlockIdx: Word;
-  TotalBlocks: Integer;
+  TotalBlocks, SectorSize, EntriesPerSec, TotalDirSecs, SecsConsumed: Integer;
+  CurTrack: Integer;
 begin
   TotalBlocks := FDPB.DSM + 1;
   SetLength(Result, TotalBlocks);
@@ -469,37 +531,65 @@ begin
   for I := 0 to 7 do if (FDPB.AL0 and ($80 shr I)) <> 0 then Result[I]   := 1;
   for I := 0 to 7 do if (FDPB.AL1 and ($80 shr I)) <> 0 then Result[I+8] := 1;
 
-  TI := (FDisk as TDiskBenderDSK).GetTrackInfo(FDPB.OFF);
-  if TI.NumSectors > 0 then
+  CurTrack := FDPB.OFF;
+  TI := FDisk.GetTrackInfo(CurTrack);
+  if TI.NumSectors = 0 then Exit;
+
+  SectorSize := 128 shl TI.SectorSize;
+  if SectorSize <= 0 then Exit;
+  EntriesPerSec := SectorSize div SizeOf(TCPMDirEntry);
+  if EntriesPerSec <= 0 then Exit;
+  TotalDirSecs := ((FDPB.DRM + 1) + EntriesPerSec - 1) div EntriesPerSec;
+
+  { Walk the directory in CP/M-logical sector order, wrapping to the next
+    track when necessary. Mirrors FindFreeDirEntry's traversal so non-CPC
+    formats with multi-track directories (e.g. PCW B-format) get accurate
+    maps. }
+  S := 0;
+  SecsConsumed := 0;
+  while SecsConsumed < TotalDirSecs do
   begin
-    BaseID := TI.SectorInfos[0].SectorID;
-    for S := 0 to (FDPB.DRM div (512 div 32)) do
+    if S >= TI.NumSectors then
     begin
-      DirSector := GetSectorByID(FDPB.OFF, BaseID + S);
-      if DirSector = nil then Continue;
-      for E := 0 to (Length(DirSector) div 32) - 1 do
+      Inc(CurTrack);
+      TI := FDisk.GetTrackInfo(CurTrack);
+      if TI.NumSectors = 0 then Exit;
+      S := 0;
+    end;
+    DirSector := ReadLogicalSector(CurTrack, S);
+    if DirSector <> nil then
+    begin
+      for E := 0 to EntriesPerSec - 1 do
       begin
-        Entry := TCPMDirEntryPtr(@DirSector[E * 32]);
+        Entry := TCPMDirEntryPtr(@DirSector[E * SizeOf(TCPMDirEntry)]);
         if (Entry^.User <= CPM_MAX_USER) then
         begin
-          for B := 0 to 15 do
+          { Anonymous (all-space-name) dir entries are real allocations on
+            copy-protected discs (the "GUARD" trick). Trust their
+            Allocations bytes — the block map must tell the truth, even
+            if that prevents AddFile from finding free space.
+            This is the deliberate decision recorded in DiskBender-jv1
+            (the issue's close-reason predates the reversal). }
+          for B := 0 to BlocksPerExtent - 1 do
           begin
-            BlockIdx := Entry^.Allocations[B];
+            BlockIdx := GetAllocBlock(Entry, B);
             if (BlockIdx > 0) and (BlockIdx < TotalBlocks) then
               Result[BlockIdx] := 2;
           end;
         end
         else if (Entry^.User = CPM_DELETED_USER) then
         begin
-          for B := 0 to 15 do
+          for B := 0 to BlocksPerExtent - 1 do
           begin
-            BlockIdx := Entry^.Allocations[B];
+            BlockIdx := GetAllocBlock(Entry, B);
             if (BlockIdx > 0) and (BlockIdx < TotalBlocks) and (Result[BlockIdx] = 0) then
               Result[BlockIdx] := 3;
           end;
         end;
       end;
     end;
+    Inc(S);
+    Inc(SecsConsumed);
   end;
 end;
 
@@ -509,7 +599,7 @@ var
   S: Integer;
 begin
   Result := nil;
-  TI := (FDisk as TDiskBenderDSK).GetTrackInfo(Track);
+  TI := FDisk.GetTrackInfo(Track);
   for S := 0 to TI.NumSectors - 1 do
   begin
     if TI.SectorInfos[S].SectorID = SectorID then
@@ -518,6 +608,76 @@ begin
       Exit;
     end;
   end;
+end;
+
+function TDiskBenderCPM.LogicalSectorID(Track, LogicalIdx: Integer): Integer;
+var
+  TI: TTrackInfoBlock;
+  SortedIDs: TBytes;
+begin
+  Result := -1;
+  TI := FDisk.GetTrackInfo(Track);
+  if (LogicalIdx < 0) or (LogicalIdx >= TI.NumSectors) then Exit;
+  { Delegate sorting to the disk object which caches the result per track. }
+  SortedIDs := FDisk.GetSortedSectorIDs(Track);
+  if (SortedIDs = nil) or (LogicalIdx >= Length(SortedIDs)) then Exit;
+  Result := SortedIDs[LogicalIdx];
+end;
+
+function TDiskBenderCPM.ReadLogicalSector(Track, LogicalIdx: Integer): TBytes;
+var
+  ID: Integer;
+begin
+  Result := nil;
+  ID := LogicalSectorID(Track, LogicalIdx);
+  if ID < 0 then Exit;
+  Result := GetSectorByID(Track, Byte(ID));
+end;
+
+procedure TDiskBenderCPM.WriteLogicalSector(Track, LogicalIdx: Integer; const Data: TBytes);
+var
+  TI: TTrackInfoBlock;
+  ID, S: Integer;
+begin
+  ID := LogicalSectorID(Track, LogicalIdx);
+  if ID < 0 then Exit;
+  TI := FDisk.GetTrackInfo(Track);
+  for S := 0 to TI.NumSectors - 1 do
+    if TI.SectorInfos[S].SectorID = ID then
+    begin
+      FDisk.PutSectorData(Track, S, Data);
+      Exit;
+    end;
+end;
+
+function TDiskBenderCPM.Is16BitAlloc: Boolean;
+begin
+  Result := FDPB.DSM > 255;
+end;
+
+function TDiskBenderCPM.BlocksPerExtent: Integer;
+begin
+  if Is16BitAlloc then Result := 8 else Result := 16;
+end;
+
+function TDiskBenderCPM.GetAllocBlock(Entry: TCPMDirEntryPtr; SlotIdx: Integer): Word;
+begin
+  if Is16BitAlloc then
+    Result := Entry^.Allocations[SlotIdx * 2] or
+              (Word(Entry^.Allocations[SlotIdx * 2 + 1]) shl 8)
+  else
+    Result := Entry^.Allocations[SlotIdx];
+end;
+
+procedure TDiskBenderCPM.SetAllocBlock(Entry: TCPMDirEntryPtr; SlotIdx: Integer; BlockIdx: Word);
+begin
+  if Is16BitAlloc then
+  begin
+    Entry^.Allocations[SlotIdx * 2]     := Byte(BlockIdx and $FF);
+    Entry^.Allocations[SlotIdx * 2 + 1] := Byte((BlockIdx shr 8) and $FF);
+  end
+  else
+    Entry^.Allocations[SlotIdx] := Byte(BlockIdx);
 end;
 
 procedure TDiskBenderCPM.RenameFile(FileIdx: Integer; const NewName: string);
@@ -544,13 +704,13 @@ begin
   for I := 0 to CFile.EntryCount - 1 do
   begin
     Loc := CFile.GetEntry(I);
-    SecData := FDisk.GetSectorData(Loc.Track, Loc.SectorIdx);
+    SecData := ReadLogicalSector(Loc.Track, Loc.SectorIdx);
     if SecData <> nil then
     begin
       Entry := TCPMDirEntryPtr(@SecData[Loc.EntryIdx * 32]);
       Move(NameBuf[1], Entry^.Filename, CPM_NAME_LEN);
       Move(ExtBuf[1],  Entry^.Extension, CPM_EXT_LEN);
-      FDisk.PutSectorData(Loc.Track, Loc.SectorIdx, SecData);
+      WriteLogicalSector(Loc.Track, Loc.SectorIdx, SecData);
     end;
   end;
 
@@ -576,14 +736,14 @@ begin
   for I := 0 to CFile.EntryCount - 1 do
   begin
     Loc := CFile.GetEntry(I);
-    SecData := FDisk.GetSectorData(Loc.Track, Loc.SectorIdx);
+    SecData := ReadLogicalSector(Loc.Track, Loc.SectorIdx);
     if SecData <> nil then
     begin
       Entry := TCPMDirEntryPtr(@SecData[Loc.EntryIdx * 32]);
       if Entry^.User = CPM_DELETED_USER then
         Entry^.User := 0;
       Entry^.Filename[0] := NewFirstChar;
-      FDisk.PutSectorData(Loc.Track, Loc.SectorIdx, SecData);
+      WriteLogicalSector(Loc.Track, Loc.SectorIdx, SecData);
     end;
   end;
 
@@ -597,71 +757,297 @@ end;
 
 function TDiskBenderCPM.FindFreeDirEntry(out Track, SecIdx, EntryIdx: Integer): Boolean;
 var
-  T, S, I: Integer;
+  CurTrack, S, I: Integer;
+  EntriesPerSec, TotalDirSecs, SectorSize, SecsConsumed: Integer;
+  TI: TTrackInfoBlock;
   SecData: TBytes;
   Entry: TCPMDirEntryPtr;
 begin
+  { Locate a free directory slot. CP/M defines free as User = $E5; the
+    filename bytes are NOT cleared by ToggleDelete, so we must not also
+    require them to be $E5. Geometry comes from DPB + the actual track info,
+    not from hardcoded constants — directories may use 256-byte sectors and
+    span multiple tracks on non-CPC formats. }
   Result := False;
-  for T := 0 to FDPB.OFF - 1 do
+  CurTrack := FDPB.OFF;
+  TI := FDisk.GetTrackInfo(CurTrack);
+  if TI.NumSectors = 0 then Exit;
+
+  SectorSize := 128 shl TI.SectorSize;
+  if SectorSize <= 0 then Exit;
+  EntriesPerSec := SectorSize div SizeOf(TCPMDirEntry);
+  if EntriesPerSec <= 0 then Exit;
+  TotalDirSecs := ((FDPB.DRM + 1) + EntriesPerSec - 1) div EntriesPerSec;
+
+  S := 0;
+  SecsConsumed := 0;
+  while SecsConsumed < TotalDirSecs do
   begin
-    for S := 0 to (FDPB.SPT div 4) - 1 do
+    if S >= TI.NumSectors then
     begin
-      SecData := FDisk.GetSectorData(T, S);
-      if SecData = nil then Continue;
-      for I := 0 to 15 do
+      Inc(CurTrack);
+      TI := FDisk.GetTrackInfo(CurTrack);
+      if TI.NumSectors = 0 then Exit;
+      S := 0;
+    end;
+    SecData := ReadLogicalSector(CurTrack, S);
+    if SecData <> nil then
+    begin
+      for I := 0 to EntriesPerSec - 1 do
       begin
-        Entry := TCPMDirEntryPtr(@SecData[I * 32]);
-        if (Entry^.User = 0) or (Entry^.User = CPM_DELETED_USER) then
+        Entry := TCPMDirEntryPtr(@SecData[I * SizeOf(TCPMDirEntry)]);
+        if Entry^.User = CPM_DELETED_USER then
         begin
-          { Must also have filename slot looking empty. }
-          if (Byte(Entry^.Filename[0]) = 0) or (Byte(Entry^.Filename[0]) = CPM_DELETED_USER) then
-          begin
-            Track := T; SecIdx := S; EntryIdx := I;
-            Exit(True);
-          end;
+          Track := CurTrack;
+          SecIdx := S;  { logical sector index — uniform across the layer }
+          EntryIdx := I;
+          Exit(True);
         end;
       end;
     end;
+    Inc(S);
+    Inc(SecsConsumed);
   end;
 end;
 
 function TDiskBenderCPM.AddFile(const FileName, Ext: string; const Data: TBytes; User: Byte): Integer;
+const
+  { One CP/M extent holds exactly 128 128-byte records = 16 KB.
+    This is a fixed CP/M constant; it does NOT depend on EXM — EXM only
+    controls how many extents share a single directory entry on very large
+    volumes. DiskBender uses one directory entry per extent for simplicity,
+    which is always correct (EXM=0 behaviour). }
+  RECS_PER_EXTENT = 128;
 var
-  SecData: TBytes;
-  Entry: TCPMDirEntryPtr;
-  Track, SecIdx, EntryIdx: Integer;
+  BlocksPerExt: Integer;
   Parsed: TCPMFileName;
+  TI: TTrackInfoBlock;
+  BlockSize, SectorSize, SectorsPerBlock, PhysSPT: Integer;
+  BlockMap: TBytes;
+  TotalBlocks, BlocksNeeded, ExtentsNeeded: Integer;
+  FreeBlocks: array of Word;
+  FoundFree, CursorBlock: Integer;
+  FreeDirSlots, CheckTrack, CheckS, CheckI: Integer;
+  CheckTI: TTrackInfoBlock;
+  CheckSec: TBytes;
+  CheckEntry: TCPMDirEntryPtr;
+  CheckEntriesPerSec, CheckTotalDirSecs, CheckSecsConsumed, CheckSectorSize: Integer;
+  B, I, S, BlockIdx: Integer;
+  ByteOffset, BytesThisSector, BytesLeft: Integer;
+  PhysTrack, PhysSecIdx: Integer;
+  Sector, DirSec: TBytes;
+  Track, SecIdx, EntryIdx: Integer;
+  Entry: TCPMDirEntryPtr;
+  TotalRecords, RecsLeft, ExtentIndex: Integer;
+  RecsThisExtent, BlocksThisExtent: Integer;
+  NewFile: TCPMFile;
   NameBuf, ExtBuf: string;
-  SizeRecords: Word;
 begin
+  { Allocate blocks, write file content into them, then create one or more
+    directory entries (one extent per 16 KB of data). Allocation width is
+    chosen by DSM: 8-bit allocation (DSM<=255) packs 16 blocks per extent,
+    16-bit (DSM>255) packs 8 Word entries into the same 16-byte field.
+    Pre-validation ensures we have both enough free blocks AND enough free
+    directory slots before writing anything — keeping the disk consistent
+    even if we run out of space mid-write. }
   Result := -1;
 
   Parsed := TCPMFileName.Parse(FileName + '.' + Ext);
   if not Parsed.IsValid then Exit;
 
-  if not FindFreeDirEntry(Track, SecIdx, EntryIdx) then Exit;
+  TI := FDisk.GetTrackInfo(FDPB.OFF);
+  if TI.NumSectors = 0 then Exit;
+  SectorSize := 128 shl TI.SectorSize;
+  if SectorSize <= 0 then Exit;
+  BlockSize := 128 shl FDPB.BSH;
+  if BlockSize <= 0 then Exit;
+  SectorsPerBlock := BlockSize div SectorSize;
+  if SectorsPerBlock <= 0 then SectorsPerBlock := 1;
 
-  SecData := FDisk.GetSectorData(Track, SecIdx);
-  if SecData = nil then Exit;
+  { Physical sectors per track come straight from the track info — TI.NumSectors
+    is the authoritative source. The old 'FDPB.SPT div 4' shortcut assumed
+    512-byte sectors and broke on 256-byte-sector formats. }
+  PhysSPT := TI.NumSectors;
+  if PhysSPT <= 0 then Exit;
 
-  SizeRecords := (Length(Data) + 127) div 128;
+  { Allocation width and entries-per-extent now derive from DSM. 8-bit
+    formats (DSM <= 255) get 16 blocks/extent; 16-bit formats (DSM > 255)
+    pack 8 Word entries into the same 16-byte Allocations array. }
+  BlocksPerExt := BlocksPerExtent;
+
+  if Length(Data) = 0 then
+    BlocksNeeded := 0
+  else
+    BlocksNeeded := (Length(Data) + BlockSize - 1) div BlockSize;
+  TotalRecords := (Length(Data) + 127) div 128;
+
+  { Number of directory entries we will need: one per extent, minimum one. }
+  if BlocksNeeded = 0 then
+    ExtentsNeeded := 1
+  else
+    ExtentsNeeded := (BlocksNeeded + BlocksPerExt - 1) div BlocksPerExt;
+
+  { Scan the block-allocation map for free blocks. GetBlockMap codes are
+    0=free, 1=system, 2=live-file, 3=deleted-but-still-referenced. CP/M's
+    deletion semantics retain the Allocations bytes — those blocks are
+    available for reuse by new files (so we treat 3 as allocatable).
+    NOTE: when reusing a code-3 block the deleted directory entry retains
+    its Allocations pointer; a subsequent GetBlockMap call will re-code it
+    as 2 (live-file) once this new file's entry is visible. The old entry
+    remains harmless because ToggleDelete will restore User=$E5 on the slot
+    and the slot will be reused on the next AddFile. }
+  BlockMap := GetBlockMap;
+  TotalBlocks := Length(BlockMap);
+  SetLength(FreeBlocks, BlocksNeeded);
+  FoundFree := 0;
+  CursorBlock := 0;
+  while (CursorBlock < TotalBlocks) and (FoundFree < BlocksNeeded) do
+  begin
+    if (BlockMap[CursorBlock] = 0) or (BlockMap[CursorBlock] = 3) then
+    begin
+      FreeBlocks[FoundFree] := CursorBlock;
+      Inc(FoundFree);
+    end;
+    Inc(CursorBlock);
+  end;
+  if FoundFree < BlocksNeeded then Exit;   { disk full }
+
+  { Pre-validate: count free directory slots. If there aren't enough for all
+    extents we'd need, bail now before writing any block data. }
+  CheckSectorSize := SectorSize;
+  CheckEntriesPerSec := CheckSectorSize div SizeOf(TCPMDirEntry);
+  if CheckEntriesPerSec <= 0 then Exit;
+  CheckTotalDirSecs := ((FDPB.DRM + 1) + CheckEntriesPerSec - 1) div CheckEntriesPerSec;
+  CheckTrack := FDPB.OFF;
+  CheckTI := FDisk.GetTrackInfo(CheckTrack);
+  if CheckTI.NumSectors = 0 then Exit;
+  FreeDirSlots := 0;
+  CheckS := 0;
+  CheckSecsConsumed := 0;
+  while CheckSecsConsumed < CheckTotalDirSecs do
+  begin
+    if CheckS >= CheckTI.NumSectors then
+    begin
+      Inc(CheckTrack);
+      CheckTI := FDisk.GetTrackInfo(CheckTrack);
+      if CheckTI.NumSectors = 0 then Break;
+      CheckS := 0;
+    end;
+    CheckSec := ReadLogicalSector(CheckTrack, CheckS);
+    if CheckSec <> nil then
+      for CheckI := 0 to CheckEntriesPerSec - 1 do
+      begin
+        CheckEntry := TCPMDirEntryPtr(@CheckSec[CheckI * SizeOf(TCPMDirEntry)]);
+        if CheckEntry^.User = CPM_DELETED_USER then
+          Inc(FreeDirSlots);
+      end;
+    Inc(CheckS);
+    Inc(CheckSecsConsumed);
+  end;
+  if FreeDirSlots < ExtentsNeeded then Exit;   { directory full }
+
+  { Pre-validate: verify every target sector is readable before writing
+    anything.  If any sector fails to read now, bail cleanly rather than
+    leaving a partially written file on disk. }
+  for B := 0 to BlocksNeeded - 1 do
+    for S := 0 to SectorsPerBlock - 1 do
+    begin
+      PhysTrack  := FDPB.OFF + ((FreeBlocks[B] * SectorsPerBlock + S) div PhysSPT);
+      PhysSecIdx := (FreeBlocks[B] * SectorsPerBlock + S) mod PhysSPT;
+      if ReadLogicalSector(PhysTrack, PhysSecIdx) = nil then Exit;
+    end;
+
+  { Write file content into the allocated blocks. }
+  ByteOffset := 0;
+  BytesLeft := Length(Data);
+  for B := 0 to BlocksNeeded - 1 do
+  begin
+    BlockIdx := FreeBlocks[B];
+    for S := 0 to SectorsPerBlock - 1 do
+    begin
+      PhysTrack  := FDPB.OFF + ((BlockIdx * SectorsPerBlock + S) div PhysSPT);
+      PhysSecIdx := (BlockIdx * SectorsPerBlock + S) mod PhysSPT;
+      Sector := ReadLogicalSector(PhysTrack, PhysSecIdx);
+      if Sector = nil then Exit;
+
+      BytesThisSector := Length(Sector);
+      if BytesThisSector > BytesLeft then BytesThisSector := BytesLeft;
+      if BytesThisSector > 0 then
+      begin
+        Move(Data[ByteOffset], Sector[0], BytesThisSector);
+        Inc(ByteOffset, BytesThisSector);
+        Dec(BytesLeft, BytesThisSector);
+      end;
+      { Pad the tail of the last partial sector with $1A (CP/M EOF). Avoids
+        leaking residual sector contents into the read of the final 128-byte
+        record and matches CP/M's textual-file convention. }
+      if BytesThisSector < Length(Sector) then
+        FillChar(Sector[BytesThisSector], Length(Sector) - BytesThisSector, $1A);
+      WriteLogicalSector(PhysTrack, PhysSecIdx, Sector);
+      if BytesLeft <= 0 then Break;
+    end;
+    if BytesLeft <= 0 then Break;
+  end;
+
+  { Build directory entries — one extent per 16-block / 128-record chunk.
+    The repeat..until form deliberately runs at least once so an empty
+    Data still produces a single zero-block dir entry. }
+  NewFile := TCPMFile.Create(User, Parsed.Name, Parsed.Ext, []);
+  NewFile.TotalRecords := TotalRecords;
+  NewFile.SizeKB := (TotalRecords + 7) div 8;
+
   NameBuf := Parsed.PaddedName;
   ExtBuf  := Parsed.PaddedExt;
 
-  Entry := TCPMDirEntryPtr(@SecData[EntryIdx * 32]);
-  FillChar(Entry^, 32, 0);
-  Move(NameBuf[1], Entry^.Filename, CPM_NAME_LEN);
-  Move(ExtBuf[1],  Entry^.Extension, CPM_EXT_LEN);
-  Entry^.User := User;
-  Entry^.RecordCount := SizeRecords;
+  ExtentIndex := 0;
+  RecsLeft := TotalRecords;
+  B := 0;
 
-  FDisk.PutSectorData(Track, SecIdx, SecData);
+  repeat
+    if not FindFreeDirEntry(Track, SecIdx, EntryIdx) then
+    begin
+      NewFile.Free;
+      Exit;
+    end;
+    DirSec := ReadLogicalSector(Track, SecIdx);
+    if DirSec = nil then begin NewFile.Free; Exit; end;
 
-  { Insert into the in-memory model so callers don't need a full rescan. }
-  FFiles.Add(TCPMFile.Create(User, Parsed.Name, Parsed.Ext, []));
-  FFiles[FFiles.Count - 1].TotalRecords := SizeRecords;
-  FFiles[FFiles.Count - 1].SizeKB := (SizeRecords + 7) div 8;
-  FFiles[FFiles.Count - 1].AddEntry(Track, SecIdx, EntryIdx);
+    Entry := TCPMDirEntryPtr(@DirSec[EntryIdx * SizeOf(TCPMDirEntry)]);
+    FillChar(Entry^, SizeOf(TCPMDirEntry), 0);
+    Move(NameBuf[1], Entry^.Filename, CPM_NAME_LEN);
+    Move(ExtBuf[1],  Entry^.Extension, CPM_EXT_LEN);
+    Entry^.User       := User;
+    Entry^.ExtentLow  := ExtentIndex and $1F;
+    Entry^.ExtentHigh := (ExtentIndex shr 5) and $3F;
+
+    BlocksThisExtent := BlocksNeeded - B;
+    if BlocksThisExtent > BlocksPerExt then
+      BlocksThisExtent := BlocksPerExt;
+
+    RecsThisExtent := RecsLeft;
+    if RecsThisExtent > RECS_PER_EXTENT then
+      RecsThisExtent := RECS_PER_EXTENT;
+    { CP/M convention: full extents store RC=128 ($80); the final extent
+      stores the remainder. RecsLeft <=0 falls through as RC=0 for empty files. }
+    if RecsThisExtent >= 128 then
+      Entry^.RecordCount := 128
+    else if RecsThisExtent > 0 then
+      Entry^.RecordCount := RecsThisExtent
+    else
+      Entry^.RecordCount := 0;
+
+    for I := 0 to BlocksThisExtent - 1 do
+      SetAllocBlock(Entry, I, FreeBlocks[B + I]);
+
+    WriteLogicalSector(Track, SecIdx, DirSec);
+    NewFile.AddEntry(Track, SecIdx, EntryIdx);
+
+    Inc(B, BlocksThisExtent);
+    Dec(RecsLeft, RecsThisExtent);
+    Inc(ExtentIndex);
+  until B >= BlocksNeeded;
+
+  FFiles.Add(NewFile);
   Result := FFiles.Count - 1;
 end;
 
@@ -670,6 +1056,40 @@ begin
   GSortState.Field := Field;
   GSortState.Asc := Ascending;
   FFiles.Sort(@CompareCPMFiles);
+end;
+
+function TDiskBenderCPM.GetDPB: TCPMDPB;
+begin
+  Result := FDPB;
+end;
+
+procedure TDiskBenderCPM.SetDPB(const Value: TCPMDPB);
+begin
+  FDPB := Value;
+end;
+
+function TDiskBenderCPM.GetFileEntryCount(FileIdx: Integer): Integer;
+begin
+  if (FileIdx < 0) or (FileIdx >= FFiles.Count) then
+    Result := 0
+  else
+    Result := FFiles[FileIdx].EntryCount;
+end;
+
+function TDiskBenderCPM.GetFileEntryLoc(FileIdx, LocIdx: Integer;
+                                          out ATrack, ASectorIdx, AEntryIdx: Byte): Boolean;
+var
+  Loc: TCPMEntryLoc;
+begin
+  ATrack := 0; ASectorIdx := 0; AEntryIdx := 0;
+  Result := False;
+  if (FileIdx < 0) or (FileIdx >= FFiles.Count) then Exit;
+  if (LocIdx < 0) or (LocIdx >= FFiles[FileIdx].EntryCount) then Exit;
+  Loc := FFiles[FileIdx].GetEntry(LocIdx);
+  ATrack    := Loc.Track;
+  ASectorIdx := Loc.SectorIdx;
+  AEntryIdx  := Loc.EntryIdx;
+  Result := True;
 end;
 
 end.

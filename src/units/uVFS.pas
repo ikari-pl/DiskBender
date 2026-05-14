@@ -17,9 +17,15 @@ type
   TEntryAttribute = (eaReadOnly, eaSystem, eaHidden, eaArchive);
   TEntryAttributes = set of TEntryAttribute;
 
+  { ── Date kinds ──────────────────────────────────────────────────── }
+
+  TDateKind = (dkCreation, dkModification);
+  TDateKindSet = set of TDateKind;
+
   { ── Sort fields ─────────────────────────────────────────────────── }
 
-  TSortField = (sfName, sfExtension, sfSize, sfUser, sfDate);
+  TSortField = (sfName, sfExtension, sfSize, sfUser, sfDate,
+                sfDateCreated, sfDateModified);
 
   { ── Physical layout descriptor ──────────────────────────────────── }
 
@@ -104,6 +110,9 @@ type
   IBlockMappable = interface
     ['{B0A10001-0016-4C50-8D00-000000000016}']
     function GetBlockMap: TBytes;
+    { Convenience accessor for Length(GetBlockMap). Retained for future callers
+      (e.g. a block-count status-bar widget); production code currently uses
+      Length(GetBlockMap) directly. }
     function GetBlockCount: Integer;
     property BlockCount: Integer read GetBlockCount;
   end;
@@ -125,7 +134,7 @@ type
 
   ISortable = interface
     ['{B0A10001-001A-4C50-8D00-000000000020}']
-    procedure Sort(AField: TSortField; Ascending: Boolean);
+    procedure Sort(AField: TSortField; Ascending: Boolean; DirsFirst: Boolean);
   end;
 
   IUserArea = interface
@@ -137,6 +146,50 @@ type
   ISummary = interface
     ['{B0A10001-001C-4C50-8D00-000000000022}']
     function GetSummaryInfo: string;
+  end;
+
+  IDated = interface
+    ['{B0A10001-001D-4C50-8D00-000000000023}']
+    function GetAvailableDates: TDateKindSet;
+    function GetDate(AKind: TDateKind): TDateTime;
+  end;
+
+  IExpandable = interface
+    ['{B0A10001-001E-4C50-8D00-000000000024}']
+    function Expand: IContainer;
+  end;
+
+  { ── Sector map types ───────────────────────────────────────────── }
+
+  TSectorState = (ssEmpty, ssData, ssSystem, ssBoot, ssNonStandard, ssFDCError);
+
+  TSectorCell = record
+    SectorID: Byte;
+    SizeBytes: Word;
+    State: TSectorState;
+    FDCSt1: Byte;
+    FDCSt2: Byte;
+  end;
+
+  TTrackColumn = record
+    TrackNum: Byte;
+    SideNum: Byte;
+    FillerByte: Byte;
+    Sectors: array of TSectorCell;
+  end;
+  TTrackColumnArray = array of TTrackColumn;
+
+  ISectorMappable = interface
+    ['{B0A10001-001F-4C50-8D00-000000000025}']
+    function GetSectorMap: TTrackColumnArray;
+  end;
+
+  { Exposes the host-filesystem path of a container so callers can read or
+    write the underlying file without casting to a concrete class. }
+  IPathProvider = interface
+    ['{B0A20002-002F-4D60-9E00-000000000026}']
+    function GetPath: string;
+    property Path: string read GetPath;
   end;
 
 implementation
