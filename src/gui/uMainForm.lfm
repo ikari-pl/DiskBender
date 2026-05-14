@@ -86,6 +86,25 @@ object MainForm: TMainForm
       end
     end
     
+    object MenuDrive: TMenuItem
+      Caption = '&Drive'
+      object MenuDriveRead: TMenuItem
+        Action = ActDriveRead
+        Caption = '&Read disc...'
+      end
+      object MenuDriveWrite: TMenuItem
+        Action = ActDriveWrite
+        Caption = '&Write disc...'
+      end
+      object MenuDriveSep1: TMenuItem
+        Caption = '-'
+      end
+      object MenuDriveInfo: TMenuItem
+        Action = ActDriveInfo
+        Caption = 'Drive &Info'
+      end
+    end
+
     object MenuWindow: TMenuItem
       Caption = '&Window'
       object MenuMinimize: TMenuItem
@@ -471,6 +490,18 @@ object ListViewDSK: TListView
     object ActAbout: TAction
       Caption = 'About'
       OnExecute = ActAboutExecute
+    end
+    object ActDriveRead: TAction
+      Caption = 'Read disc...'
+      OnExecute = ActDriveReadExecute
+    end
+    object ActDriveWrite: TAction
+      Caption = 'Write disc...'
+      OnExecute = ActDriveWriteExecute
+    end
+    object ActDriveInfo: TAction
+      Caption = 'Drive Info'
+      OnExecute = ActDriveInfoExecute
     end
   end
 end

@@ -22,7 +22,8 @@ interface
 uses
   Classes, SysUtils, Math, DateUtils, Forms, Controls, Graphics, Dialogs,
   ComCtrls, ExtCtrls, Menus, ActnList, StdCtrls, Buttons, LCLType,
-  uDSK, uCPM, uInterfaces, uCPMTypes, uFormatters, uViewers, CoreAPI;
+  uDSK, uCPM, uInterfaces, uCPMTypes, uFormatters, uViewers, CoreAPI,
+  uExternalDrive;
 
 type
   { Row in the host filesystem listing. Kept separate from FileSystem data
@@ -55,6 +56,11 @@ type
     MenuHexViewer: TMenuItem;
     MenuDiskMap: TMenuItem;
     MenuDiskInfo: TMenuItem;
+    MenuDrive: TMenuItem;
+    MenuDriveRead: TMenuItem;
+    MenuDriveWrite: TMenuItem;
+    MenuDriveSep1: TMenuItem;
+    MenuDriveInfo: TMenuItem;
     MenuWindow: TMenuItem;
     MenuMinimize: TMenuItem;
     MenuZoom: TMenuItem;
@@ -114,6 +120,9 @@ type
     ActDiskInfo: TAction;
     ActExit: TAction;
     ActAbout: TAction;
+    ActDriveRead: TAction;
+    ActDriveWrite: TAction;
+    ActDriveInfo: TAction;
 
     procedure FormCreate(Sender: TObject);
     procedure FormDestroy(Sender: TObject);
@@ -130,6 +139,9 @@ type
     procedure ActDiskInfoExecute(Sender: TObject);
     procedure ActExitExecute(Sender: TObject);
     procedure ActAboutExecute(Sender: TObject);
+    procedure ActDriveReadExecute(Sender: TObject);
+    procedure ActDriveWriteExecute(Sender: TObject);
+    procedure ActDriveInfoExecute(Sender: TObject);
 
     procedure MenuMinimizeClick(Sender: TObject);
     procedure BtnF1HelpClick(Sender: TObject);
@@ -449,7 +461,7 @@ begin
       Item := ListViewHost.Items.Add;
       case E.Kind of
         rkParent:   Item.Caption := '..';
-        rkHostDir:  Item.Caption := '[' + E.Name + ']';
+        rkHostDir:  Item.Caption := '<' + E.Name + '>';
         rkHostFile: Item.Caption := E.Name;
       end;
       if E.Kind = rkHostFile then
@@ -1090,6 +1102,122 @@ procedure TMainForm.ListViewHostDragDrop(Sender, Source: TObject; X, Y: Integer)
 begin
   if Source = ListViewDSK then
     DoCopySelectedToHost;
+end;
+
+{ === Greaseweazle drive actions === }
+
+procedure TMainForm.ActDriveReadExecute(Sender: TObject);
+var
+  GwPath, DriveStr, ImagePath, Log: string;
+  SD: TSaveDialog;
+begin
+  GwPath := FindGwExecutable;
+  if GwPath = '' then
+  begin
+    MessageDlg('Greaseweazle Not Found',
+      GW_NOT_FOUND_HINT, mtError, [mbOK], 0);
+    Exit;
+  end;
+
+  if not InputQuery('Read Disc', 'Drive letter (a/b):', DriveStr) then Exit;
+  if DriveStr = '' then DriveStr := 'a';
+
+  SD := TSaveDialog.Create(Self);
+  try
+    SD.Title   := 'Save disc image as...';
+    SD.Filter  := 'DSK images (*.dsk)|*.dsk|All files (*.*)|*.*';
+    SD.DefaultExt := 'dsk';
+    if not SD.Execute then Exit;
+    ImagePath := SD.FileName;
+  finally
+    SD.Free;
+  end;
+
+  if not GwReadDisc(GwPath, DriveStr, ImagePath, Log) then
+  begin
+    MessageDlg('Read Failed', 'gw read failed:' + LineEnding + Log,
+      mtError, [mbOK], 0);
+    Exit;
+  end;
+
+  MessageDlg('Read Complete',
+    'Disc read successfully.' + LineEnding + 'Image saved to:' + LineEnding +
+    ImagePath, mtInformation, [mbOK], 0);
+
+  { Offer to open the resulting DSK in the left pane. }
+  if MessageDlg('Open Image?',
+    'Open the new image in the DSK pane?',
+    mtConfirmation, [mbYes, mbNo], 0) = mrYes then
+    LoadDSK(ImagePath);
+end;
+
+procedure TMainForm.ActDriveWriteExecute(Sender: TObject);
+var
+  GwPath, DriveStr, Log: string;
+begin
+  if FDisk = nil then
+  begin
+    MessageDlg('No Disc Image', 'No DSK image is loaded.', mtError, [mbOK], 0);
+    Exit;
+  end;
+
+  GwPath := FindGwExecutable;
+  if GwPath = '' then
+  begin
+    MessageDlg('Greaseweazle Not Found',
+      GW_NOT_FOUND_HINT, mtError, [mbOK], 0);
+    Exit;
+  end;
+
+  if FDisk.Modified then
+  begin
+    case MessageDlg('Unsaved Changes',
+      'The DSK has unsaved changes. Save before writing to hardware?',
+      mtConfirmation, [mbYes, mbNo, mbCancel], 0) of
+      mrCancel: Exit;
+      mrYes:    FDisk.Save;
+      { mrNo: proceed with on-disk version }
+    end;
+  end;
+
+  if not InputQuery('Write Disc', 'Drive letter (a/b):', DriveStr) then Exit;
+  if DriveStr = '' then DriveStr := 'a';
+
+  if MessageDlg('Confirm Write',
+    'Write ' + ExtractFileName(FDSKPath) + ' to drive ' + DriveStr + '?' +
+    LineEnding + 'This will ERASE the physical disc.',
+    mtWarning, [mbYes, mbNo], 0) <> mrYes then Exit;
+
+  if not GwWriteDisc(GwPath, DriveStr, FDSKPath, Log) then
+  begin
+    MessageDlg('Write Failed', 'gw write failed:' + LineEnding + Log,
+      mtError, [mbOK], 0);
+    Exit;
+  end;
+
+  MessageDlg('Write Complete', 'Disc written successfully.', mtInformation, [mbOK], 0);
+end;
+
+procedure TMainForm.ActDriveInfoExecute(Sender: TObject);
+var
+  GwPath, Log: string;
+begin
+  GwPath := FindGwExecutable;
+  if GwPath = '' then
+  begin
+    MessageDlg('Greaseweazle Not Found',
+      GW_NOT_FOUND_HINT, mtError, [mbOK], 0);
+    Exit;
+  end;
+
+  if not GwDriveInfo(GwPath, Log) then
+  begin
+    MessageDlg('Drive Info Failed', 'gw info failed:' + LineEnding + Log,
+      mtError, [mbOK], 0);
+    Exit;
+  end;
+
+  ShowTextViewer('Greaseweazle Drive Info', Log);
 end;
 
 end.
