@@ -306,6 +306,17 @@ begin
       FEntries[I] := FEntries[I - 1];
     FEntries[0] := TBootEntry.Create(Off, BootBytes);
   end;
+
+  { Prepend a '..' navigable to the host directory containing this DSK.
+    Without it, entering a .dsk leaves no visible way out except Backspace
+    -- the keyboard shortcut works but isn't discoverable. Pointing at
+    ExtractFileDir(FPath) means Enter on '..' opens the host directory
+    as a fresh TLocalDirEntry (not the same instance as whichever local
+    container originally launched us, but functionally the same view). }
+  SetLength(FEntries, Length(FEntries) + 1);
+  for I := High(FEntries) downto 1 do
+    FEntries[I] := FEntries[I - 1];
+  FEntries[0] := TLocalDirEntry.CreateParent(FPath);
 end;
 
 constructor TDSKContainer.Create(const ADSKPath: string);
