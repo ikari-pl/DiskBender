@@ -3110,6 +3110,227 @@ begin
   end;
 end;
 
+{ ── Brief view (lmBrief) tests ───────────────────────────────── }
+
+{ At 80-wide output the pane is 40 cols, PW = 38, NumCols = 2 (since 32 <= 38 < 60).
+  ColW = (38 - 1) div 2 = 18; columns sit at X=2 and X=2+19=21. }
+procedure TestBriefViewTwoColumnsAt80Wide;
+var
+  Inp: TTestTerminalInput;
+  Out_: TTestTerminalOutput;
+  Ctrl: TTUIController;
+  Left: TTestContainer;
+begin
+  WriteLn('--- TestBriefViewTwoColumnsAt80Wide ---');
+  Inp := MakeInput;
+  Out_ := TTestTerminalOutput.Create(80, 25);
+  Left := TTestContainer.Create('Disk', [
+    TTestFileEntry.Create('AAA.TXT', 1) as IEntry,
+    TTestFileEntry.Create('BBB.TXT', 1) as IEntry,
+    TTestFileEntry.Create('CCC.TXT', 1) as IEntry,
+    TTestFileEntry.Create('DDD.TXT', 1) as IEntry
+  ]);
+  Ctrl := TTUIController.Create(ITerminalInput(Inp), ITerminalOutput(Out_),
+                                IContainer(Left), nil);
+  try
+    Ctrl.HandleEvent(InputEventMod(kaChar, '1', KM_ALT));
+    Ctrl.RenderForTest;
+    Check('AAA at col 0 of row 0', Pos('AAA.TXT', Out_.TextAt(2, 4, 8)) = 1);
+    Check('BBB at col 1 of row 0', Pos('BBB.TXT', Out_.TextAt(21, 4, 8)) = 1);
+    Check('CCC at col 0 of row 1', Pos('CCC.TXT', Out_.TextAt(2, 5, 8)) = 1);
+    Check('DDD at col 1 of row 1', Pos('DDD.TXT', Out_.TextAt(21, 5, 8)) = 1);
+  finally
+    Ctrl.Free;
+  end;
+end;
+
+{ At 132-wide output the pane is 66 cols, PW = 64, NumCols = 3 (PW >= 60).
+  ColW = (64 - 2) div 3 = 20; columns at X=2, X=2+21=23, X=2+42=44. }
+procedure TestBriefViewThreeColumnsAtWideOutput;
+var
+  Inp: TTestTerminalInput;
+  Out_: TTestTerminalOutput;
+  Ctrl: TTUIController;
+  Left: TTestContainer;
+begin
+  WriteLn('--- TestBriefViewThreeColumnsAtWideOutput ---');
+  Inp := MakeInput;
+  Out_ := TTestTerminalOutput.Create(132, 25);
+  Left := TTestContainer.Create('Disk', [
+    TTestFileEntry.Create('A1.TXT', 1) as IEntry,
+    TTestFileEntry.Create('B1.TXT', 1) as IEntry,
+    TTestFileEntry.Create('C1.TXT', 1) as IEntry,
+    TTestFileEntry.Create('A2.TXT', 1) as IEntry,
+    TTestFileEntry.Create('B2.TXT', 1) as IEntry,
+    TTestFileEntry.Create('C2.TXT', 1) as IEntry
+  ]);
+  Ctrl := TTUIController.Create(ITerminalInput(Inp), ITerminalOutput(Out_),
+                                IContainer(Left), nil);
+  try
+    Ctrl.HandleEvent(InputEventMod(kaChar, '1', KM_ALT));
+    Ctrl.RenderForTest;
+    Check('A1 at col 0', Pos('A1.TXT', Out_.TextAt(2, 4, 6)) = 1);
+    Check('B1 at col 1', Pos('B1.TXT', Out_.TextAt(23, 4, 6)) = 1);
+    Check('C1 at col 2', Pos('C1.TXT', Out_.TextAt(44, 4, 6)) = 1);
+    Check('Row 1 starts at col 0', Pos('A2.TXT', Out_.TextAt(2, 5, 6)) = 1);
+  finally
+    Ctrl.Free;
+  end;
+end;
+
+{ Load-bearing fallback: when DisplayNames don't fit even at 2 cols, the
+  Brief path bails out and the standard single-column row loop renders.
+  Lock the bracket-truncation rule so future "always 3 cols" optimisations
+  can't silently steal trailing chars from <DIR> / [GUARD#nn] markers. }
+procedure TestBriefViewFallsBackToFullWhenNamesTooLong;
+var
+  Inp: TTestTerminalInput;
+  Out_: TTestTerminalOutput;
+  Ctrl: TTUIController;
+  Left: TTestContainer;
+begin
+  WriteLn('--- TestBriefViewFallsBackToFullWhenNamesTooLong ---');
+  Inp := MakeInput;
+  Out_ := TTestTerminalOutput.Create(80, 25);
+  { 25-char names; ColW-1 = 17 at 2 cols, so they don't fit -> fall back to 1 col }
+  Left := TTestContainer.Create('Disk', [
+    TTestFileEntry.Create('VERYLONG_FILENAME_AAA.TXT', 1) as IEntry,
+    TTestFileEntry.Create('VERYLONG_FILENAME_BBB.TXT', 1) as IEntry
+  ]);
+  Ctrl := TTUIController.Create(ITerminalInput(Inp), ITerminalOutput(Out_),
+                                IContainer(Left), nil);
+  try
+    Ctrl.HandleEvent(InputEventMod(kaChar, '1', KM_ALT));
+    Ctrl.RenderForTest;
+    { Both names on their own row (single-column lmFull layout), no
+      mid-row truncation. The trailing '.TXT' must be present in BOTH names
+      -- if a "smart" 2-col path truncates to fit, the second column would
+      lose it. }
+    Check('First name full at row 4', Pos('VERYLONG_FILENAME_AAA.TXT', Out_.TextAt(1, 4, 38)) > 0);
+    Check('Second name on row 5 (own row)', Pos('VERYLONG_FILENAME_BBB.TXT', Out_.TextAt(1, 5, 38)) > 0);
+    { No second entry rendered on row 4 (no 2nd column) }
+    Check('Row 4 has only first entry', Pos('BBB', Out_.TextAt(20, 4, 18)) = 0);
+  finally
+    Ctrl.Free;
+  end;
+end;
+
+{ kaRight in Brief moves cursor by 1, hopping across columns and wrapping
+  naturally into the next row when it crosses the last column. }
+procedure TestBriefCursorRightWrapsRows;
+var
+  Inp: TTestTerminalInput;
+  Out_: TTestTerminalOutput;
+  Ctrl: TTUIController;
+  Left: IContainer;
+begin
+  WriteLn('--- TestBriefCursorRightWrapsRows ---');
+  Inp := MakeInput;
+  Out_ := MakeOutput;
+  Left := MakeContainer('Left', 6);
+  Ctrl := TTUIController.Create(ITerminalInput(Inp), ITerminalOutput(Out_), Left, nil);
+  try
+    Ctrl.HandleEvent(InputEventMod(kaChar, '1', KM_ALT));
+    Ctrl.HandleEvent(InputEvent(kaRight));
+    Check('Right moves cursor by 1', Ctrl.GetCursorPos(psLeft) = 1);
+    Ctrl.HandleEvent(InputEvent(kaRight));
+    Check('Right again wraps to next row', Ctrl.GetCursorPos(psLeft) = 2);
+  finally
+    Ctrl.Free;
+  end;
+end;
+
+{ kaDown in Brief moves cursor by NumCols (2 at default 80-wide), not 1. }
+procedure TestBriefCursorDownByNumCols;
+var
+  Inp: TTestTerminalInput;
+  Out_: TTestTerminalOutput;
+  Ctrl: TTUIController;
+  Left: IContainer;
+begin
+  WriteLn('--- TestBriefCursorDownByNumCols ---');
+  Inp := MakeInput;
+  Out_ := MakeOutput;  { 80 wide -> 2 cols }
+  Left := MakeContainer('Left', 8);
+  Ctrl := TTUIController.Create(ITerminalInput(Inp), ITerminalOutput(Out_), Left, nil);
+  try
+    Ctrl.HandleEvent(InputEventMod(kaChar, '1', KM_ALT));
+    Ctrl.HandleEvent(InputEvent(kaDown));
+    Check('Down moves cursor by NumCols=2', Ctrl.GetCursorPos(psLeft) = 2);
+    Ctrl.HandleEvent(InputEvent(kaDown));
+    Check('Down again moves to cursor 4', Ctrl.GetCursorPos(psLeft) = 4);
+  finally
+    Ctrl.Free;
+  end;
+end;
+
+{ Alt+1 from the default lmFull state must produce a 2-col layout (verified
+  by entry 1 appearing in the right column of row 0 rather than on row 1). }
+procedure TestBriefAlt1ToggleFromFull;
+var
+  Inp: TTestTerminalInput;
+  Out_: TTestTerminalOutput;
+  Ctrl: TTUIController;
+  Left: TTestContainer;
+begin
+  WriteLn('--- TestBriefAlt1ToggleFromFull ---');
+  Inp := MakeInput;
+  Out_ := MakeOutput;
+  Left := TTestContainer.Create('Disk', [
+    TTestFileEntry.Create('FIRST.TXT', 1) as IEntry,
+    TTestFileEntry.Create('SECOND.TXT', 1) as IEntry
+  ]);
+  Ctrl := TTUIController.Create(ITerminalInput(Inp), ITerminalOutput(Out_),
+                                IContainer(Left), nil);
+  try
+    Ctrl.RenderForTest;
+    { In lmFull the second entry is on its own row 5, not on row 4 col 1. }
+    Check('lmFull: SECOND on row 5', Pos('SECOND.TXT', Out_.TextAt(1, 5, 20)) > 0);
+    Ctrl.HandleEvent(InputEventMod(kaChar, '1', KM_ALT));
+    Ctrl.RenderForTest;
+    { After Alt+1, SECOND should appear on row 4 at column 1 (X=21). }
+    Check('lmBrief: SECOND on row 4 col 1', Pos('SECOND.TXT', Out_.TextAt(21, 4, 12)) = 1);
+  finally
+    Ctrl.Free;
+  end;
+end;
+
+{ Bracket conventions survive the Brief layout: angle brackets on directories,
+  square brackets on GUARD pseudo-entries, both with full trailing markers. }
+procedure TestBriefGuardsAndDirsBracketsVisible;
+var
+  Inp: TTestTerminalInput;
+  Out_: TTestTerminalOutput;
+  Ctrl: TTUIController;
+  Left: TTestContainer;
+  ScreenText: string;
+  Y: Integer;
+begin
+  WriteLn('--- TestBriefGuardsAndDirsBracketsVisible ---');
+  Inp := MakeInput;
+  Out_ := MakeOutput;
+  Left := TTestContainer.Create('Mixed', [
+    TTestDirEntry.Create('SRC', []) as IEntry,
+    TTestFileEntry.Create('[GUARD#00]', 1) as IEntry,
+    TTestDirEntry.Create('DOCS', []) as IEntry,
+    TTestFileEntry.Create('REAL.COM', 16) as IEntry
+  ]);
+  Ctrl := TTUIController.Create(ITerminalInput(Inp), ITerminalOutput(Out_),
+                                IContainer(Left), nil);
+  try
+    Ctrl.HandleEvent(InputEventMod(kaChar, '1', KM_ALT));
+    Ctrl.RenderForTest;
+    ScreenText := '';
+    for Y := 1 to Out_.GetHeight do
+      ScreenText := ScreenText + Out_.TextAt(1, Y, Out_.GetWidth);
+    Check('Dir SRC keeps angle brackets', Pos('<SRC>', ScreenText) > 0);
+    Check('Dir DOCS keeps angle brackets', Pos('<DOCS>', ScreenText) > 0);
+    Check('GUARD entry keeps square brackets', Pos('[GUARD#00]', ScreenText) > 0);
+  finally
+    Ctrl.Free;
+  end;
+end;
+
 begin
   WriteLn;
   WriteLn('=== DiskBender TUI Controller Tests ===');
@@ -3256,6 +3477,15 @@ begin
   TestInputDialogCancelReturnsFalse;
   TestInputDialogCancelByMouseClick;
   TestInputDialogBackspace;
+
+  { Brief view (lmBrief) tests }
+  TestBriefViewTwoColumnsAt80Wide;
+  TestBriefViewThreeColumnsAtWideOutput;
+  TestBriefViewFallsBackToFullWhenNamesTooLong;
+  TestBriefCursorRightWrapsRows;
+  TestBriefCursorDownByNumCols;
+  TestBriefAlt1ToggleFromFull;
+  TestBriefGuardsAndDirsBracketsVisible;
 
   WriteLn;
   WriteLn('=== Results: ', PassCount, ' passed, ', FailCount, ' failed ===');

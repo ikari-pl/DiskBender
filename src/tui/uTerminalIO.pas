@@ -94,6 +94,7 @@ const
   CH_SHADE_DARK   = #$E2#$96#$93;  { ▓ U+2593 }
 
 function InputEvent(AAction: TKeyAction; AChar: Char = #0): TInputEvent;
+function InputEventMod(AAction: TKeyAction; AChar: Char; AModifiers: Byte): TInputEvent;
 function MouseEvent(AX, AY: Integer; AButton: TMouseButton; AWheel: Integer = 0): TInputEvent;
 function RepeatUTF8Char(const ACh: string; ACount: Integer): string;
 function UTF8CodePointLen(AByte: Byte): Integer;
@@ -109,6 +110,12 @@ begin
   Result.MouseButton := mbNone;
   Result.MouseWheel := 0;
   Result.Modifiers := 0;
+end;
+
+function InputEventMod(AAction: TKeyAction; AChar: Char; AModifiers: Byte): TInputEvent;
+begin
+  Result := InputEvent(AAction, AChar);
+  Result.Modifiers := AModifiers;
 end;
 
 function MouseEvent(AX, AY: Integer; AButton: TMouseButton; AWheel: Integer = 0): TInputEvent;

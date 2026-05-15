@@ -90,6 +90,15 @@ type
     { Entry formatting }
     function FormatEntry(AEntry: IEntry; AWidth: Integer; AShowDate: Boolean; ADateKind: TDateKind): string;
 
+    { Brief view (lmBrief) helpers. NumCols depends on pane width and the
+      longest DisplayName so brackets on <DIRNAME> / [GUARD#nn] are never
+      truncated. When names don't fit even at 2 cols, falls back to 1 col
+      (i.e. lmFull rendering for that paint pass). }
+    function ListNumColsFor(ASide: TPaneSide; AInnerW: Integer): Integer;
+    procedure RenderBriefBody(ASide: TPaneSide; X1, X2: Integer;
+                              BoxAttr: Byte; IsFocused: Boolean);
+    procedure SetListMode(ASide: TPaneSide; AMode: TListMode);
+
     { Actions }
     procedure ActionNavigateUp;
     procedure ActionNavigateDown;
@@ -539,6 +548,113 @@ begin
   end;
 end;
 
+{ Pick column count for the Brief layout. Returns 1 (fall back to lmFull
+  rendering), 2, or 3. Starts from a width-bucketed target then shrinks
+  until the longest DisplayName fits ColWidth-1 chars -- never truncating
+  bracket markers like <DIR> or [GUARD#nn] which encode meaning. }
+function TTUIController.ListNumColsFor(ASide: TPaneSide; AInnerW: Integer): Integer;
+const
+  GUTTER = 1;
+var
+  Cont: IContainer;
+  I, MaxNameLen, ColW: Integer;
+  Entry: IEntry;
+begin
+  Cont := ContainerForSide(ASide);
+  if (Cont = nil) or (Cont.EntryCount = 0) then Exit(1);
+
+  if AInnerW >= 60 then Result := 3
+  else if AInnerW >= 32 then Result := 2
+  else Result := 1;
+
+  if Result = 1 then Exit;
+
+  MaxNameLen := 0;
+  for I := 0 to Cont.EntryCount - 1 do
+  begin
+    Entry := Cont.GetEntry(I);
+    if Entry = nil then Continue;
+    if Length(Entry.GetDisplayName) > MaxNameLen then
+      MaxNameLen := Length(Entry.GetDisplayName);
+  end;
+
+  while Result > 1 do
+  begin
+    ColW := (AInnerW - (Result - 1) * GUTTER) div Result;
+    if ColW - 1 >= MaxNameLen then Break;
+    Dec(Result);
+  end;
+end;
+
+{ Multi-column name-only rendering. Cursor stays 1D: Cursor mod NumCols is
+  column, Cursor div NumCols is row. Scroll is in entries but always a
+  multiple of NumCols so the top row never starts mid-line. }
+procedure TTUIController.RenderBriefBody(ASide: TPaneSide; X1, X2: Integer;
+                                         BoxAttr: Byte; IsFocused: Boolean);
+const
+  GUTTER = 1;
+var
+  Cont: IContainer;
+  PW, NumCols, ColW, MaxRows: Integer;
+  Row, Col, Idx, X, Y: Integer;
+  Entry: IEntry;
+  IsCursor, IsSelected: Boolean;
+  ItemAttr: Byte;
+  Cell, Name: string;
+  TotalRows: Integer;
+begin
+  Cont := ContainerForSide(ASide);
+  if Cont = nil then Exit;
+  PW := X2 - X1 - 1;
+  NumCols := ListNumColsFor(ASide, PW);
+  if NumCols < 2 then Exit;  { caller falls back to lmFull path }
+
+  ColW := (PW - (NumCols - 1) * GUTTER) div NumCols;
+  MaxRows := PaneHeight;
+  for Row := 0 to MaxRows - 1 do
+  begin
+    for Col := 0 to NumCols - 1 do
+    begin
+      Idx := FScrolls[ASide] + Row * NumCols + Col;
+      if Idx >= Cont.EntryCount then Break;
+      Entry := Cont.GetEntry(Idx);
+      if Entry = nil then Continue;
+      Name := Entry.GetDisplayName;
+      if Length(Name) > ColW - 1 then
+        Cell := Copy(Name, 1, ColW - 1)
+      else
+        Cell := Name;
+      Cell := Cell + StringOfChar(' ', ColW - Length(Cell));
+
+      IsCursor := IsFocused and (Idx = FCursors[ASide]);
+      IsSelected := GetSelected(ASide, Idx);
+      if IsCursor and IsSelected then      ItemAttr := $3E
+      else if IsCursor then                ItemAttr := $30
+      else if IsSelected and IsFocused then ItemAttr := $1E
+      else if IsSelected then              ItemAttr := $16
+      else                                 ItemAttr := BoxAttr;
+
+      X := X1 + 1 + Col * (ColW + GUTTER);
+      Y := 4 + Row;
+      FOutput.PutText(X, Y, Cell, ItemAttr);
+    end;
+  end;
+
+  TotalRows := (Cont.EntryCount + NumCols - 1) div NumCols;
+  if TotalRows > MaxRows then
+    DrawScrollbar(X2, 4, 4 + MaxRows - 1,
+                  TotalRows, MaxRows, FScrolls[ASide] div NumCols, BoxAttr);
+end;
+
+{ Mode toggle hook. Resets scroll alignment so Brief's "scroll is a multiple
+  of NumCols" invariant holds immediately on entering lmBrief. }
+procedure TTUIController.SetListMode(ASide: TPaneSide; AMode: TListMode);
+begin
+  if FListModes[ASide] = AMode then Exit;
+  FListModes[ASide] := AMode;
+  FScrolls[ASide] := 0;
+end;
+
 procedure TTUIController.DrawPane(ASide: TPaneSide; X1, X2: Integer);
 var
   Cont: IContainer;
@@ -594,6 +710,16 @@ begin
 
   EnsureSelections(ASide);
   IsFocused := (FFocus = ASide);
+
+  { Brief layout: multi-column name-only rendering. Falls through to the
+    standard row loop below when ListNumColsFor returns 1 (names too long
+    for safe truncation), so lmBrief on a narrow pane still shows something. }
+  if (FListModes[ASide] = lmBrief) and (ListNumColsFor(ASide, PW) >= 2) then
+  begin
+    RenderBriefBody(ASide, X1, X2, BoxAttr, IsFocused);
+    Exit;
+  end;
+
   MaxVisible := PaneHeight;
   for I := 0 to MaxVisible - 1 do
   begin
@@ -1637,25 +1763,58 @@ end;
 { ── Actions ──────────────────────────────────────────────────── }
 
 procedure TTUIController.ActionNavigateUp;
+var
+  NumCols, Step: Integer;
+  HalfWidth: Integer;
 begin
-  if ActiveCursor > 0 then
+  HalfWidth := (FOutput.Width div 2) - 1;
+  if FListModes[FFocus] = lmBrief then
+    NumCols := ListNumColsFor(FFocus, HalfWidth)
+  else
+    NumCols := 1;
+  Step := NumCols;
+  if ActiveCursor - Step >= 0 then
   begin
-    SetActiveCursor(ActiveCursor - 1);
+    SetActiveCursor(ActiveCursor - Step);
     if ActiveCursor < ActiveScroll then
-      SetActiveScroll(ActiveCursor);
+      SetActiveScroll(ActiveCursor - (ActiveCursor mod NumCols));
+  end
+  else if (NumCols > 1) and (ActiveCursor > 0) then
+  begin
+    { On the top row of a Brief view, Up jumps to entry 0 rather than wrapping. }
+    SetActiveCursor(0);
+    SetActiveScroll(0);
   end;
 end;
 
 procedure TTUIController.ActionNavigateDown;
 var
   Cont: IContainer;
+  NumCols, Step, NewCursor, ScrollRow, CursorRow: Integer;
+  HalfWidth: Integer;
 begin
   Cont := ActiveContainer;
   if Cont = nil then Exit;
-  if ActiveCursor < Cont.EntryCount - 1 then
+  HalfWidth := (FOutput.Width div 2) - 1;
+  if FListModes[FFocus] = lmBrief then
+    NumCols := ListNumColsFor(FFocus, HalfWidth)
+  else
+    NumCols := 1;
+  Step := NumCols;
+  NewCursor := ActiveCursor + Step;
+  if NewCursor > Cont.EntryCount - 1 then
+    NewCursor := Cont.EntryCount - 1;
+  if NewCursor > ActiveCursor then
   begin
-    SetActiveCursor(ActiveCursor + 1);
-    if ActiveCursor >= ActiveScroll + PaneHeight then
+    SetActiveCursor(NewCursor);
+    if NumCols > 1 then
+    begin
+      ScrollRow := ActiveScroll div NumCols;
+      CursorRow := ActiveCursor div NumCols;
+      if CursorRow >= ScrollRow + PaneHeight then
+        SetActiveScroll((CursorRow - PaneHeight + 1) * NumCols);
+    end
+    else if ActiveCursor >= ActiveScroll + PaneHeight then
       SetActiveScroll(ActiveScroll + 1);
   end;
 end;
@@ -2748,8 +2907,19 @@ begin
   end;
 
   case AEvent.Action of
-    kaLeft:      if FMode = tmSectorMap then ActionMapScrollLeft;
-    kaRight:     if FMode = tmSectorMap then ActionMapScrollRight;
+    kaLeft:
+      if FMode = tmSectorMap then ActionMapScrollLeft
+      else if (FMode = tmCommander) and (FListModes[FFocus] = lmBrief) and (ActiveCursor > 0) then
+      begin
+        SetActiveCursor(ActiveCursor - 1);
+        if ActiveCursor < ActiveScroll then SetActiveScroll(ActiveCursor);
+      end;
+    kaRight:
+      if FMode = tmSectorMap then ActionMapScrollRight
+      else if (FMode = tmCommander) and (FListModes[FFocus] = lmBrief)
+              and (ActiveContainer <> nil)
+              and (ActiveCursor < ActiveContainer.EntryCount - 1) then
+        SetActiveCursor(ActiveCursor + 1);
     kaUp:        if FMode <> tmSectorMap then ActionNavigateUp;
     kaDown:      if FMode <> tmSectorMap then ActionNavigateDown;
     kaHome:      if FMode = tmSectorMap then ActionMapScrollHome else ActionHome;
@@ -2773,13 +2943,26 @@ begin
     kaF10:       ActionExit;
     kaMouse:     HandleMouse(AEvent);
     kaChar:
-      case UpCase(AEvent.CharValue) of
-        'W': ActionNavigateUp;
-        'S': ActionNavigateDown;
-        'Q': ActionExit;
-        'M': ActionToggleMap;
-        ' ': ActionSelect;
-      end;
+      { Alt+1/2/3 toggle list mode on the focused pane. Arrives as a regular
+        kaChar with KM_ALT in Modifiers on terminals that emit ESC-prefix
+        sequences for Alt-chord keys (xterm, iTerm2, kitty, wezterm). On
+        terminals that drop Alt entirely the user uses the F9 menu instead. }
+      if (AEvent.Modifiers and KM_ALT) <> 0 then
+      begin
+        case AEvent.CharValue of
+          '1': SetListMode(FFocus, lmBrief);
+          '2': SetListMode(FFocus, lmFull);
+          '3': SetListMode(FFocus, lmWide);
+        end;
+      end
+      else
+        case UpCase(AEvent.CharValue) of
+          'W': ActionNavigateUp;
+          'S': ActionNavigateDown;
+          'Q': ActionExit;
+          'M': ActionToggleMap;
+          ' ': ActionSelect;
+        end;
   else
     { Ignore unknown keys }
   end;
