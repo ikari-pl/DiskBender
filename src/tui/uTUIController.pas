@@ -105,6 +105,11 @@ type
                               BoxAttr: Byte; IsFocused: Boolean);
     procedure SetListMode(ASide: TPaneSide; AMode: TListMode);
 
+    { Info pane (prInfo): renders capability-derived stats about the OPPOSITE
+      pane's cursor entry. Updates as the cursor moves on the focused pane. }
+    procedure DrawInfoPane(ASide: TPaneSide; X1, X2: Integer);
+    procedure ActionToggleInfoPane;
+
     { Actions }
     procedure ActionNavigateUp;
     procedure ActionNavigateDown;
@@ -708,6 +713,170 @@ begin
   FScrolls[ASide] := 0;
 end;
 
+{ Helper for DrawInfoPane: append "Label: Value" to ARows if AValue is
+  non-empty. Lets the body code stay flat with no per-row nil checks. }
+procedure AppendInfoRow(var ARows: array of string; var ACount: Integer;
+                       const ALabel, AValue: string);
+begin
+  if AValue = '' then Exit;
+  if ACount >= Length(ARows) then Exit;
+  ARows[ACount] := ALabel + ': ' + AValue;
+  Inc(ACount);
+end;
+
+{ Format an attribute set as a 4-char R/S/H/A string; '-' for unset flags. }
+function AttrsToShortString(AAttrs: TEntryAttributes): string;
+begin
+  Result := '';
+  if eaReadOnly in AAttrs then Result := Result + 'R' else Result := Result + '-';
+  if eaSystem   in AAttrs then Result := Result + 'S' else Result := Result + '-';
+  if eaHidden   in AAttrs then Result := Result + 'H' else Result := Result + '-';
+  if eaArchive  in AAttrs then Result := Result + 'A' else Result := Result + '-';
+end;
+
+procedure TTUIController.DrawInfoPane(ASide: TPaneSide; X1, X2: Integer);
+const
+  MAX_ROWS = 24;
+var
+  OtherSide: TPaneSide;
+  OtherCont: IContainer;
+  CursorEntry: IEntry;
+  Cont: IContainer;
+  Sz: ISizeable;
+  Dt: IDated;
+  UA: IUserArea;
+  Attr: IAttributed;
+  Summary: ISummary;
+  Sub: IContainer;
+  Title, ValueStr: string;
+  BoxAttr: Byte;
+  PW, Y, I, RowCount, Idx: Integer;
+  Rows: array[0..MAX_ROWS - 1] of string;
+  SummaryStr: string;
+  SummaryLines: TStringList;
+begin
+  if FFocus = ASide then BoxAttr := $1F else BoxAttr := $17;
+  PW := X2 - X1 - 1;
+
+  { The "other side" is the one we mirror data from. }
+  if ASide = psLeft then OtherSide := psRight else OtherSide := psLeft;
+  OtherCont := ContainerForSide(OtherSide);
+
+  CursorEntry := nil;
+  if OtherCont <> nil then
+  begin
+    Idx := FCursors[OtherSide];
+    if (Idx >= 0) and (Idx < OtherCont.EntryCount) then
+      CursorEntry := OtherCont.GetEntry(Idx);
+  end;
+
+  if CursorEntry <> nil then
+    Title := 'Info: ' + CursorEntry.DisplayName
+  else
+    Title := 'Info';
+  DrawBox(X1, 3, X2, FOutput.Height - 1, Title, BoxAttr);
+  FillRect(X1 + 1, 4, X2 - 1, FOutput.Height - 2, BoxAttr);
+
+  if CursorEntry = nil then
+  begin
+    FOutput.PutText(X1 + 2, 5, '(no cursor entry on opposite pane)', BoxAttr);
+    Exit;
+  end;
+
+  RowCount := 0;
+
+  { Type line: container vs leaf, with subtype hints from interface support. }
+  if Supports(CursorEntry, IContainer, Sub) then
+  begin
+    if Supports(CursorEntry, IBlockMappable) then
+      AppendInfoRow(Rows, RowCount, 'Type', 'disk container')
+    else if Supports(CursorEntry, IPhysicalLayout) then
+      AppendInfoRow(Rows, RowCount, 'Type', 'disk image')
+    else
+      AppendInfoRow(Rows, RowCount, 'Type', 'directory');
+    AppendInfoRow(Rows, RowCount, 'Entries', IntToStr(Sub.EntryCount));
+  end
+  else
+    AppendInfoRow(Rows, RowCount, 'Type', 'file');
+
+  AppendInfoRow(Rows, RowCount, 'Name', CursorEntry.GetName);
+
+  if Supports(CursorEntry, ISizeable, Sz) then
+  begin
+    case Sz.SizeUnit of
+      suBytes:   ValueStr := IntToStr(Sz.Size) + ' B';
+      suKB:      ValueStr := IntToStr(Sz.Size) + ' KB';
+      suBlocks:  ValueStr := IntToStr(Sz.Size) + ' blocks';
+      suRecords: ValueStr := IntToStr(Sz.Size) + ' records';
+      suSectors: ValueStr := IntToStr(Sz.Size) + ' sectors';
+    end;
+    AppendInfoRow(Rows, RowCount, 'Size', ValueStr);
+  end;
+
+  if Supports(CursorEntry, IDated, Dt) then
+  begin
+    if dkModification in Dt.GetAvailableDates then
+      AppendInfoRow(Rows, RowCount, 'Modified',
+                    FormatDateTime('yyyy-mm-dd hh:nn', Dt.GetDate(dkModification)));
+    if dkCreation in Dt.GetAvailableDates then
+      AppendInfoRow(Rows, RowCount, 'Created',
+                    FormatDateTime('yyyy-mm-dd hh:nn', Dt.GetDate(dkCreation)));
+  end;
+
+  if Supports(CursorEntry, IUserArea, UA) then
+    AppendInfoRow(Rows, RowCount, 'User', IntToStr(UA.User));
+
+  if Supports(CursorEntry, IAttributed, Attr) then
+    AppendInfoRow(Rows, RowCount, 'Attr', AttrsToShortString(Attr.GetAttributes));
+
+  { Container-only: total free space if ISummary supplies it (CP/M does). }
+  if Supports(CursorEntry, ISummary, Summary) then
+  begin
+    SummaryStr := Summary.GetSummaryInfo;
+    { ISummary on a single file produces a one-liner; on a container it can
+      be multi-line. Append each line as its own row -- truncate at MAX_ROWS. }
+    if SummaryStr <> '' then
+    begin
+      SummaryLines := TStringList.Create;
+      try
+        SummaryLines.Text := SummaryStr;
+        for I := 0 to SummaryLines.Count - 1 do
+          if (Trim(SummaryLines[I]) <> '') and (RowCount < MAX_ROWS) then
+          begin
+            Rows[RowCount] := SummaryLines[I];
+            Inc(RowCount);
+          end;
+      finally
+        SummaryLines.Free;
+      end;
+    end;
+  end;
+
+  { Container fallback: child entry count if no ISummary was provided. }
+  if (not Supports(CursorEntry, ISummary)) and Supports(CursorEntry, IContainer, Cont) then
+    AppendInfoRow(Rows, RowCount, 'Children', IntToStr(Cont.EntryCount));
+
+  { Paint rows. }
+  for I := 0 to RowCount - 1 do
+  begin
+    Y := 4 + I;
+    if Y > FOutput.Height - 2 then Break;
+    FOutput.PutText(X1 + 2, Y, Copy(Rows[I], 1, PW - 2), BoxAttr);
+  end;
+end;
+
+procedure TTUIController.ActionToggleInfoPane;
+var
+  Other: TPaneSide;
+begin
+  if FFocus = psLeft then Other := psRight else Other := psLeft;
+  if ContainerForSide(Other) = nil then Exit;
+  if FRoles[Other] = prInfo then
+    FRoles[Other] := prList
+  else
+    FRoles[Other] := prInfo;
+end;
+
 procedure TTUIController.DrawPane(ASide: TPaneSide; X1, X2: Integer);
 var
   Cont: IContainer;
@@ -720,15 +889,12 @@ var
   PW: Integer;
   IsFocused, IsCursor, IsSelected, ShowDate: Boolean;
 begin
-  { Role dispatch: future companion modes (prInfo, prQuickView, prSectorMap,
-    prBlockMap, prTree) take over rendering when set. For now only prList is
-    implemented; other roles fall through to the list path so a partially-
-    plumbed state still renders something usable. ListMode (lmBrief/lmFull/
-    lmWide) is consulted further down where row rendering happens. }
+  { Role dispatch: companion modes draw their own box+content and return
+    early. Future modes (prQuickView, prSectorMap, prBlockMap, prTree) plug
+    in here as additional cases. List rendering with ListMode dispatch
+    happens further down. }
   case FRoles[ASide] of
-    prList: ;  { fall through to list rendering below }
-  else
-    ;  { not implemented yet -- fall through }
+    prInfo: begin DrawInfoPane(ASide, X1, X2); Exit; end;
   end;
 
   Cont := ContainerForSide(ASide);
@@ -3002,10 +3168,11 @@ begin
         terminals that drop Alt entirely the user uses the F9 menu instead. }
       if (AEvent.Modifiers and KM_ALT) <> 0 then
       begin
-        case AEvent.CharValue of
+        case UpCase(AEvent.CharValue) of
           '1': SetListMode(FFocus, lmBrief);
           '2': SetListMode(FFocus, lmFull);
           '3': SetListMode(FFocus, lmWide);
+          'I': ActionToggleInfoPane;
         end;
       end
       else

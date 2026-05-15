@@ -3426,6 +3426,150 @@ begin
   end;
 end;
 
+{ ── Info pane (prInfo) tests ────────────────────────────────── }
+
+{ Helper: dump the whole virtual screen to a single string for grep-style
+  assertions in Info/QuickView/Tree tests. }
+function ScreenDump(AOut: TTestTerminalOutput): string;
+var
+  Y: Integer;
+begin
+  Result := '';
+  for Y := 1 to AOut.GetHeight do
+    Result := Result + AOut.TextAt(1, Y, AOut.GetWidth) + #10;
+end;
+
+{ Alt+I on the focused pane sets the OPPOSITE pane's role to prInfo. The
+  Info pane should pull stats from the focused pane's cursor entry. }
+procedure TestInfoPaneShowsCursorEntryName;
+var
+  Inp: TTestTerminalInput;
+  Out_: TTestTerminalOutput;
+  Ctrl: TTUIController;
+  Left, Right: TTestContainer;
+  Screen: string;
+begin
+  WriteLn('--- TestInfoPaneShowsCursorEntryName ---');
+  Inp := MakeInput;
+  Out_ := MakeOutput;
+  Left := TTestContainer.Create('Disk', [
+    TTestFileEntry.Create('HELLO.BAS', 4096) as IEntry,
+    TTestFileEntry.Create('LOADER.BIN', 256) as IEntry
+  ]);
+  Right := TTestContainer.Create('Local', [
+    TTestFileEntry.Create('FILLER.TXT', 1) as IEntry
+  ]);
+  Ctrl := TTUIController.Create(ITerminalInput(Inp), ITerminalOutput(Out_),
+                                IContainer(Left), IContainer(Right));
+  try
+    { Focus left, then Alt+I makes right pane prInfo about left's cursor. }
+    Ctrl.HandleEvent(InputEventMod(kaChar, 'I', KM_ALT));
+    Ctrl.RenderForTest;
+    Screen := ScreenDump(Out_);
+    Check('Info pane header shows HELLO.BAS', Pos('Info: HELLO.BAS', Screen) > 0);
+    Check('Info pane shows Type row', Pos('Type:', Screen) > 0);
+    Check('Info pane shows Size row', Pos('Size:', Screen) > 0);
+  finally
+    Ctrl.Free;
+  end;
+end;
+
+{ Cursor moves on the focused pane should update the Info pane's content. }
+procedure TestInfoPaneUpdatesWithCursorMoves;
+var
+  Inp: TTestTerminalInput;
+  Out_: TTestTerminalOutput;
+  Ctrl: TTUIController;
+  Left, Right: TTestContainer;
+  Screen: string;
+begin
+  WriteLn('--- TestInfoPaneUpdatesWithCursorMoves ---');
+  Inp := MakeInput;
+  Out_ := MakeOutput;
+  Left := TTestContainer.Create('Disk', [
+    TTestFileEntry.Create('FIRST.BAS', 100) as IEntry,
+    TTestFileEntry.Create('SECOND.BIN', 200) as IEntry
+  ]);
+  Right := TTestContainer.Create('Local', [
+    TTestFileEntry.Create('FILLER.TXT', 1) as IEntry
+  ]);
+  Ctrl := TTUIController.Create(ITerminalInput(Inp), ITerminalOutput(Out_),
+                                IContainer(Left), IContainer(Right));
+  try
+    Ctrl.HandleEvent(InputEventMod(kaChar, 'I', KM_ALT));
+    Ctrl.HandleEvent(InputEvent(kaDown));
+    Ctrl.RenderForTest;
+    Screen := ScreenDump(Out_);
+    Check('Info pane follows cursor to SECOND.BIN', Pos('Info: SECOND.BIN', Screen) > 0);
+    Check('Old cursor name not in header', Pos('Info: FIRST', Screen) = 0);
+  finally
+    Ctrl.Free;
+  end;
+end;
+
+{ User + Attr rows appear for an IUserArea / IAttributed entry (CP/M-style). }
+procedure TestInfoPaneShowsUserAndAttr;
+var
+  Inp: TTestTerminalInput;
+  Out_: TTestTerminalOutput;
+  Ctrl: TTUIController;
+  Left, Right: TTestContainer;
+  Screen: string;
+begin
+  WriteLn('--- TestInfoPaneShowsUserAndAttr ---');
+  Inp := MakeInput;
+  Out_ := MakeOutput;
+  Left := TTestContainer.Create('Disk', [
+    TTestUserEntry.Create('SECRET.COM', 512, 7, [eaReadOnly, eaSystem]) as IEntry
+  ]);
+  Right := TTestContainer.Create('Local', [
+    TTestFileEntry.Create('FILLER.TXT', 1) as IEntry
+  ]);
+  Ctrl := TTUIController.Create(ITerminalInput(Inp), ITerminalOutput(Out_),
+                                IContainer(Left), IContainer(Right));
+  try
+    Ctrl.HandleEvent(InputEventMod(kaChar, 'I', KM_ALT));
+    Ctrl.RenderForTest;
+    Screen := ScreenDump(Out_);
+    Check('Info pane shows User row', Pos('User: 7', Screen) > 0);
+    Check('Info pane shows Attr row', Pos('Attr: RS--', Screen) > 0);
+  finally
+    Ctrl.Free;
+  end;
+end;
+
+{ Alt+I twice reverts the opposite pane back to its list view. }
+procedure TestInfoPaneAltIToggleOff;
+var
+  Inp: TTestTerminalInput;
+  Out_: TTestTerminalOutput;
+  Ctrl: TTUIController;
+  Left, Right: TTestContainer;
+  Screen: string;
+begin
+  WriteLn('--- TestInfoPaneAltIToggleOff ---');
+  Inp := MakeInput;
+  Out_ := MakeOutput;
+  Left := TTestContainer.Create('Disk', [
+    TTestFileEntry.Create('HELLO.BAS', 4096) as IEntry
+  ]);
+  Right := TTestContainer.Create('Local', [
+    TTestFileEntry.Create('NOTES.TXT', 1) as IEntry
+  ]);
+  Ctrl := TTUIController.Create(ITerminalInput(Inp), ITerminalOutput(Out_),
+                                IContainer(Left), IContainer(Right));
+  try
+    Ctrl.HandleEvent(InputEventMod(kaChar, 'I', KM_ALT));
+    Ctrl.HandleEvent(InputEventMod(kaChar, 'I', KM_ALT));
+    Ctrl.RenderForTest;
+    Screen := ScreenDump(Out_);
+    Check('Right pane back to list (NOTES.TXT visible)', Pos('NOTES.TXT', Screen) > 0);
+    Check('Info header gone', Pos('Info:', Screen) = 0);
+  finally
+    Ctrl.Free;
+  end;
+end;
+
 { Bracket conventions survive the Brief layout: angle brackets on directories,
   square brackets on GUARD pseudo-entries, both with full trailing markers. }
 procedure TestBriefGuardsAndDirsBracketsVisible;
@@ -3623,6 +3767,12 @@ begin
   TestWideShowsUserColumn;
   TestWideShowsDashesForNonAttributed;
   TestWideAlt3ToggleFromFull;
+
+  { Info pane (prInfo) tests }
+  TestInfoPaneShowsCursorEntryName;
+  TestInfoPaneUpdatesWithCursorMoves;
+  TestInfoPaneShowsUserAndAttr;
+  TestInfoPaneAltIToggleOff;
 
   WriteLn;
   WriteLn('=== Results: ', PassCount, ' passed, ', FailCount, ' failed ===');
