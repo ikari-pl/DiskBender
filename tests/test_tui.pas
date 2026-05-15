@@ -3570,6 +3570,107 @@ begin
   end;
 end;
 
+{ ── Quick View pane (prQuickView) tests ─────────────────────── }
+
+{ Alt+Q makes the opposite pane render a hex/ASCII preview of the focused
+  pane's cursor entry. The hex bytes of "ABC" (0x41 0x42 0x43) should be
+  visible on the screen. }
+procedure TestQuickViewShowsHexOfCursorEntry;
+var
+  Inp: TTestTerminalInput;
+  Out_: TTestTerminalOutput;
+  Ctrl: TTUIController;
+  Left, Right: TTestContainer;
+  Screen: string;
+begin
+  WriteLn('--- TestQuickViewShowsHexOfCursorEntry ---');
+  Inp := MakeInput;
+  Out_ := MakeOutput;
+  Left := TTestContainer.Create('Disk', [
+    TTestFileEntry.Create('HELLO.BAS', 3, 'ABC') as IEntry
+  ]);
+  Right := TTestContainer.Create('Local', [
+    TTestFileEntry.Create('FILLER.TXT', 1) as IEntry
+  ]);
+  Ctrl := TTUIController.Create(ITerminalInput(Inp), ITerminalOutput(Out_),
+                                IContainer(Left), IContainer(Right));
+  try
+    Ctrl.HandleEvent(InputEventMod(kaChar, 'Q', KM_ALT));
+    Ctrl.RenderForTest;
+    Screen := ScreenDump(Out_);
+    Check('Quick header shows HELLO.BAS', Pos('Quick: HELLO.BAS', Screen) > 0);
+    Check('Hex 41 (=A) visible', Pos('41', Screen) > 0);
+    Check('Hex 42 (=B) visible', Pos('42', Screen) > 0);
+    Check('Hex 43 (=C) visible', Pos('43', Screen) > 0);
+  finally
+    Ctrl.Free;
+  end;
+end;
+
+{ Containers (no ICopySource) yield a friendly "(no preview: not a file)"
+  message instead of crashing. }
+procedure TestQuickViewNoPreviewForContainer;
+var
+  Inp: TTestTerminalInput;
+  Out_: TTestTerminalOutput;
+  Ctrl: TTUIController;
+  Left, Right: TTestContainer;
+  Screen: string;
+begin
+  WriteLn('--- TestQuickViewNoPreviewForContainer ---');
+  Inp := MakeInput;
+  Out_ := MakeOutput;
+  Left := TTestContainer.Create('Disk', [
+    TTestDirEntry.Create('SUBDIR', []) as IEntry
+  ]);
+  Right := TTestContainer.Create('Local', [
+    TTestFileEntry.Create('FILLER.TXT', 1) as IEntry
+  ]);
+  Ctrl := TTUIController.Create(ITerminalInput(Inp), ITerminalOutput(Out_),
+                                IContainer(Left), IContainer(Right));
+  try
+    Ctrl.HandleEvent(InputEventMod(kaChar, 'Q', KM_ALT));
+    Ctrl.RenderForTest;
+    Screen := ScreenDump(Out_);
+    Check('Container shows no-preview message',
+          (Pos('no preview', Screen) > 0) or (Pos('not a file', Screen) > 0));
+  finally
+    Ctrl.Free;
+  end;
+end;
+
+{ Alt+Q twice reverts the opposite pane back to its list view. }
+procedure TestQuickViewAltQToggleOff;
+var
+  Inp: TTestTerminalInput;
+  Out_: TTestTerminalOutput;
+  Ctrl: TTUIController;
+  Left, Right: TTestContainer;
+  Screen: string;
+begin
+  WriteLn('--- TestQuickViewAltQToggleOff ---');
+  Inp := MakeInput;
+  Out_ := MakeOutput;
+  Left := TTestContainer.Create('Disk', [
+    TTestFileEntry.Create('HELLO.BAS', 3, 'ABC') as IEntry
+  ]);
+  Right := TTestContainer.Create('Local', [
+    TTestFileEntry.Create('NOTES.TXT', 1) as IEntry
+  ]);
+  Ctrl := TTUIController.Create(ITerminalInput(Inp), ITerminalOutput(Out_),
+                                IContainer(Left), IContainer(Right));
+  try
+    Ctrl.HandleEvent(InputEventMod(kaChar, 'Q', KM_ALT));
+    Ctrl.HandleEvent(InputEventMod(kaChar, 'Q', KM_ALT));
+    Ctrl.RenderForTest;
+    Screen := ScreenDump(Out_);
+    Check('Right pane back to list (NOTES.TXT visible)', Pos('NOTES.TXT', Screen) > 0);
+    Check('Quick header gone', Pos('Quick:', Screen) = 0);
+  finally
+    Ctrl.Free;
+  end;
+end;
+
 { Bracket conventions survive the Brief layout: angle brackets on directories,
   square brackets on GUARD pseudo-entries, both with full trailing markers. }
 procedure TestBriefGuardsAndDirsBracketsVisible;
@@ -3773,6 +3874,11 @@ begin
   TestInfoPaneUpdatesWithCursorMoves;
   TestInfoPaneShowsUserAndAttr;
   TestInfoPaneAltIToggleOff;
+
+  { Quick View pane (prQuickView) tests }
+  TestQuickViewShowsHexOfCursorEntry;
+  TestQuickViewNoPreviewForContainer;
+  TestQuickViewAltQToggleOff;
 
   WriteLn;
   WriteLn('=== Results: ', PassCount, ' passed, ', FailCount, ' failed ===');

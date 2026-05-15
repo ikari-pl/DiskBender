@@ -110,6 +110,12 @@ type
     procedure DrawInfoPane(ASide: TPaneSide; X1, X2: Integer);
     procedure ActionToggleInfoPane;
 
+    { Quick View pane (prQuickView): hex/text preview of the OPPOSITE pane's
+      cursor entry. Half-pane width forces a tighter 8-bytes-per-row layout
+      than the full-screen tmHex modal. }
+    procedure DrawQuickViewPane(ASide: TPaneSide; X1, X2: Integer);
+    procedure ActionToggleQuickViewPane;
+
     { Actions }
     procedure ActionNavigateUp;
     procedure ActionNavigateDown;
@@ -877,6 +883,143 @@ begin
     FRoles[Other] := prInfo;
 end;
 
+{ Read up to AMaxBytes from an ICopySource into a TBytes. Returns the
+  actual byte count read; 0 if the source raised an exception (e.g. the
+  CP/M sector chain didn't validate). Quick View tolerates failure --
+  the preview just shows "(unable to read)" rather than crashing. }
+function ReadCopySourceBytes(ASource: ICopySource; AMaxBytes: Integer;
+                             out ABytes: TBytes): Integer;
+var
+  MS: TMemoryStream;
+  N: Integer;
+begin
+  Result := 0;
+  SetLength(ABytes, 0);
+  MS := TMemoryStream.Create;
+  try
+    try
+      ASource.CopyTo(MS);
+    except
+      Exit(0);
+    end;
+    MS.Position := 0;
+    N := MS.Size;
+    if N > AMaxBytes then N := AMaxBytes;
+    if N <= 0 then Exit(0);
+    SetLength(ABytes, N);
+    MS.ReadBuffer(ABytes[0], N);
+    Result := N;
+  finally
+    MS.Free;
+  end;
+end;
+
+procedure TTUIController.DrawQuickViewPane(ASide: TPaneSide; X1, X2: Integer);
+const
+  MAX_BYTES = 4096;       { keep render fast even on cursor-thrash }
+  BYTES_PER_ROW = 8;
+var
+  OtherSide: TPaneSide;
+  OtherCont: IContainer;
+  CursorEntry: IEntry;
+  Source: ICopySource;
+  Bytes: TBytes;
+  N: Integer;
+  Title: string;
+  BoxAttr: Byte;
+  PW, Y, MaxRows, Row, Col, Idx, ContentX: Integer;
+  HexPart, AscPart: string;
+  ByteVal: Byte;
+  AscCh: Char;
+  CursorIdx: Integer;
+  HasAscii: Boolean;
+begin
+  if FFocus = ASide then BoxAttr := $1F else BoxAttr := $17;
+  PW := X2 - X1 - 1;
+  HasAscii := PW >= 36;   { 4 addr + space + 23 hex + space + '|' + 8 ascii = 37 }
+
+  if ASide = psLeft then OtherSide := psRight else OtherSide := psLeft;
+  OtherCont := ContainerForSide(OtherSide);
+  CursorEntry := nil;
+  if OtherCont <> nil then
+  begin
+    CursorIdx := FCursors[OtherSide];
+    if (CursorIdx >= 0) and (CursorIdx < OtherCont.EntryCount) then
+      CursorEntry := OtherCont.GetEntry(CursorIdx);
+  end;
+
+  if CursorEntry <> nil then
+    Title := 'Quick: ' + CursorEntry.DisplayName
+  else
+    Title := 'Quick';
+  DrawBox(X1, 3, X2, FOutput.Height - 1, Title, BoxAttr);
+  FillRect(X1 + 1, 4, X2 - 1, FOutput.Height - 2, BoxAttr);
+
+  if CursorEntry = nil then
+  begin
+    FOutput.PutText(X1 + 2, 5, '(no cursor entry)', BoxAttr);
+    Exit;
+  end;
+
+  if not Supports(CursorEntry, ICopySource, Source) then
+  begin
+    FOutput.PutText(X1 + 2, 5, '(no preview: not a file)', BoxAttr);
+    Exit;
+  end;
+
+  N := ReadCopySourceBytes(Source, MAX_BYTES, Bytes);
+  if N = 0 then
+  begin
+    FOutput.PutText(X1 + 2, 5, '(empty or unreadable)', BoxAttr);
+    Exit;
+  end;
+
+  MaxRows := PaneHeight;
+  ContentX := X1 + 2;
+  for Row := 0 to MaxRows - 1 do
+  begin
+    Idx := Row * BYTES_PER_ROW;
+    if Idx >= N then Break;
+    HexPart := IntToHex(Idx, 4);
+    AscPart := '';
+    for Col := 0 to BYTES_PER_ROW - 1 do
+    begin
+      if Idx + Col < N then
+      begin
+        ByteVal := Bytes[Idx + Col];
+        HexPart := HexPart + ' ' + IntToHex(ByteVal, 2);
+        if (ByteVal >= 32) and (ByteVal < 127) then
+          AscCh := Chr(ByteVal)
+        else
+          AscCh := '.';
+        AscPart := AscPart + AscCh;
+      end
+      else
+      begin
+        HexPart := HexPart + '   ';
+        AscPart := AscPart + ' ';
+      end;
+    end;
+    Y := 4 + Row;
+    if HasAscii then
+      FOutput.PutText(ContentX, Y, HexPart + ' |' + AscPart, BoxAttr)
+    else
+      FOutput.PutText(ContentX, Y, HexPart, BoxAttr);
+  end;
+end;
+
+procedure TTUIController.ActionToggleQuickViewPane;
+var
+  Other: TPaneSide;
+begin
+  if FFocus = psLeft then Other := psRight else Other := psLeft;
+  if ContainerForSide(Other) = nil then Exit;
+  if FRoles[Other] = prQuickView then
+    FRoles[Other] := prList
+  else
+    FRoles[Other] := prQuickView;
+end;
+
 procedure TTUIController.DrawPane(ASide: TPaneSide; X1, X2: Integer);
 var
   Cont: IContainer;
@@ -894,7 +1037,8 @@ begin
     in here as additional cases. List rendering with ListMode dispatch
     happens further down. }
   case FRoles[ASide] of
-    prInfo: begin DrawInfoPane(ASide, X1, X2); Exit; end;
+    prInfo:      begin DrawInfoPane(ASide, X1, X2); Exit; end;
+    prQuickView: begin DrawQuickViewPane(ASide, X1, X2); Exit; end;
   end;
 
   Cont := ContainerForSide(ASide);
@@ -3173,6 +3317,7 @@ begin
           '2': SetListMode(FFocus, lmFull);
           '3': SetListMode(FFocus, lmWide);
           'I': ActionToggleInfoPane;
+          'Q': ActionToggleQuickViewPane;
         end;
       end
       else
