@@ -3916,6 +3916,152 @@ begin
   end;
 end;
 
+{ ── Filter (glob) tests ─────────────────────────────────────── }
+
+{ Pressing '+' opens an InputDialog. Typing 'BAS' + Enter sets the pane's
+  glob filter to 'BAS'. The filter is then visible by *behavior*: non-
+  matching rows render in the dim grey attr ($18) while matching rows
+  keep the standard panel attr ($1F). }
+procedure TestFilterGlobDimsNonMatchingRows;
+var
+  Inp: TTestTerminalInput;
+  Out_: TTestTerminalOutput;
+  Ctrl: TTUIController;
+  Left: TTestContainer;
+  HelloAttr, LoaderAttr: Byte;
+  HelloX, LoaderX, Y: Integer;
+begin
+  WriteLn('--- TestFilterGlobDimsNonMatchingRows ---');
+  Inp := MakeInput;
+  Out_ := MakeOutput;
+  Left := TTestContainer.Create('Disk', [
+    TTestFileEntry.Create('HELLO.BAS', 100) as IEntry,
+    TTestFileEntry.Create('LOADER.BIN', 200) as IEntry
+  ]);
+  { Enqueue glob input: 'BAS' + Enter }
+  Inp.Enqueue(kaChar, 'B');
+  Inp.Enqueue(kaChar, 'A');
+  Inp.Enqueue(kaChar, 'S');
+  Inp.Enqueue(kaEnter);
+  Ctrl := TTUIController.Create(ITerminalInput(Inp), ITerminalOutput(Out_),
+                                IContainer(Left), nil);
+  try
+    { '+' triggers the glob filter dialog; the queued keys answer it. }
+    Ctrl.HandleEvent(InputEvent(kaChar, '+'));
+    Ctrl.RenderForTest;
+    { Locate the rows and inspect attributes (using a scan; the layout has
+      the cursor on row 4 by default). Cursor row uses inverse attr, so use
+      the non-cursor row (LOADER.BIN at row 5) to test dimming. }
+    HelloX := 0; LoaderX := 0;
+    for Y := 4 to 6 do
+    begin
+      if Pos('HELLO.BAS', Out_.TextAt(1, Y, 40)) > 0 then HelloX := Y;
+      if Pos('LOADER.BIN', Out_.TextAt(1, Y, 40)) > 0 then LoaderX := Y;
+    end;
+    Check('HELLO.BAS row found', HelloX > 0);
+    Check('LOADER.BIN row found', LoaderX > 0);
+    { Sample the attr at column 3 of each row (well past the leading space). }
+    HelloAttr := Out_.AttrAt(3, HelloX);
+    LoaderAttr := Out_.AttrAt(3, LoaderX);
+    { HELLO matches 'BAS' (via implicit *BAS* wrap) -- bright; LOADER doesn't -- dim ($18). }
+    Check('Matching row not dimmed', HelloAttr <> $18);
+    Check('Non-matching row is dimmed', LoaderAttr = $18);
+  finally
+    Ctrl.Free;
+  end;
+end;
+
+{ Clearing the glob (entering an empty pattern) restores all rows to
+  bright. }
+procedure TestFilterGlobClearRestoresBrightness;
+var
+  Inp: TTestTerminalInput;
+  Out_: TTestTerminalOutput;
+  Ctrl: TTUIController;
+  Left: TTestContainer;
+  LoaderAttr: Byte;
+  LoaderY, Y: Integer;
+begin
+  WriteLn('--- TestFilterGlobClearRestoresBrightness ---');
+  Inp := MakeInput;
+  Out_ := MakeOutput;
+  Left := TTestContainer.Create('Disk', [
+    TTestFileEntry.Create('HELLO.BAS', 100) as IEntry,
+    TTestFileEntry.Create('LOADER.BIN', 200) as IEntry
+  ]);
+  { First filter pass: 'BAS' + Enter; second: clear with backspaces + Enter. }
+  Inp.Enqueue(kaChar, 'B');
+  Inp.Enqueue(kaChar, 'A');
+  Inp.Enqueue(kaChar, 'S');
+  Inp.Enqueue(kaEnter);
+  Inp.Enqueue(kaBackspace);
+  Inp.Enqueue(kaBackspace);
+  Inp.Enqueue(kaBackspace);
+  Inp.Enqueue(kaEnter);
+  Ctrl := TTUIController.Create(ITerminalInput(Inp), ITerminalOutput(Out_),
+                                IContainer(Left), nil);
+  try
+    Ctrl.HandleEvent(InputEvent(kaChar, '+'));   { set filter }
+    Ctrl.HandleEvent(InputEvent(kaChar, '+'));   { clear filter }
+    Ctrl.RenderForTest;
+    LoaderY := 0;
+    for Y := 4 to 6 do
+      if Pos('LOADER.BIN', Out_.TextAt(1, Y, 40)) > 0 then LoaderY := Y;
+    Check('LOADER.BIN row still rendered', LoaderY > 0);
+    LoaderAttr := Out_.AttrAt(3, LoaderY);
+    Check('Non-matching row no longer dimmed', LoaderAttr <> $18);
+  finally
+    Ctrl.Free;
+  end;
+end;
+
+{ Wildcard pattern '*.BIN' should match the explicit-extension entry but
+  not '*.BAS'. Verify by attribute comparison. }
+procedure TestFilterGlobExplicitWildcard;
+var
+  Inp: TTestTerminalInput;
+  Out_: TTestTerminalOutput;
+  Ctrl: TTUIController;
+  Left: TTestContainer;
+  HelloAttr, LoaderAttr: Byte;
+  HelloY, LoaderY, Y: Integer;
+begin
+  WriteLn('--- TestFilterGlobExplicitWildcard ---');
+  Inp := MakeInput;
+  Out_ := MakeOutput;
+  Left := TTestContainer.Create('Disk', [
+    TTestFileEntry.Create('HELLO.BAS', 100) as IEntry,
+    TTestFileEntry.Create('LOADER.BIN', 200) as IEntry
+  ]);
+  Inp.Enqueue(kaChar, '*');
+  Inp.Enqueue(kaChar, '.');
+  Inp.Enqueue(kaChar, 'B');
+  Inp.Enqueue(kaChar, 'I');
+  Inp.Enqueue(kaChar, 'N');
+  Inp.Enqueue(kaEnter);
+  Ctrl := TTUIController.Create(ITerminalInput(Inp), ITerminalOutput(Out_),
+                                IContainer(Left), nil);
+  try
+    { Move cursor onto LOADER first so HELLO is the non-cursor row;
+      otherwise the cursor inverse-attr ($30) masks the dim ($18). }
+    Ctrl.HandleEvent(InputEvent(kaDown));
+    Ctrl.HandleEvent(InputEvent(kaChar, '+'));
+    Ctrl.RenderForTest;
+    HelloY := 0; LoaderY := 0;
+    for Y := 4 to 6 do
+    begin
+      if Pos('HELLO.BAS', Out_.TextAt(1, Y, 40)) > 0 then HelloY := Y;
+      if Pos('LOADER.BIN', Out_.TextAt(1, Y, 40)) > 0 then LoaderY := Y;
+    end;
+    HelloAttr := Out_.AttrAt(3, HelloY);
+    LoaderAttr := Out_.AttrAt(3, LoaderY);
+    Check('HELLO.BAS dimmed by *.BIN filter', HelloAttr = $18);
+    Check('LOADER.BIN matches *.BIN filter', LoaderAttr <> $18);
+  finally
+    Ctrl.Free;
+  end;
+end;
+
 { Bracket conventions survive the Brief layout: angle brackets on directories,
   square brackets on GUARD pseudo-entries, both with full trailing markers. }
 procedure TestBriefGuardsAndDirsBracketsVisible;
@@ -4136,6 +4282,11 @@ begin
   TestTreePaneSpaceExpandsContainer;
   TestTreePaneSpaceTwiceCollapses;
   TestTreePaneAltTToggleOff;
+
+  { Filter (glob) tests }
+  TestFilterGlobDimsNonMatchingRows;
+  TestFilterGlobClearRestoresBrightness;
+  TestFilterGlobExplicitWildcard;
 
   WriteLn;
   WriteLn('=== Results: ', PassCount, ' passed, ', FailCount, ' failed ===');

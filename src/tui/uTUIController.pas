@@ -23,6 +23,20 @@ type
     companion. Conflating them was why the prior FViewMode rotted. }
   TListMode = (lmBrief, lmFull, lmWide);
 
+  { Per-pane filter state. Glob is the one filter wired into rendering at
+    this commit (visual dim of non-matching entries). The other fields are
+    declared so the record is forward-compatible; hide-mode row filtering
+    + UserArea/Show* wiring through every render path is a follow-up that
+    requires translating Cursor between filtered and raw indices in every
+    action call site (Delete, Rename, Enter, Copy, ...). }
+  TPaneFilters = record
+    Glob: string;           { '' = no glob; else FPC Masks pattern, case-insensitive }
+    ShowDeleted: Boolean;   { reserved -- not wired }
+    ShowHidden: Boolean;    { reserved -- not wired }
+    ShowGuards: Boolean;    { reserved -- not wired }
+    UserArea: ShortInt;     { reserved -- -1 = all }
+  end;
+
   { Flat-list element produced by BuildTreeNodes during a tree-pane render. }
   TTreeNode = record
     Entry: IEntry;
@@ -54,6 +68,7 @@ type
     FRoles: array[TPaneSide] of TPaneRole;
     FListModes: array[TPaneSide] of TListMode;
     FTreeExpanded: array[TPaneSide] of array of string;
+    FFilters: array[TPaneSide] of TPaneFilters;
     FRunning: Boolean;
     FMenuOpen: Boolean;
     FNowYear: Word;
@@ -149,6 +164,12 @@ type
     procedure ToggleTreePath(ASide: TPaneSide; const APath: string);
     procedure ActionToggleTreePane;
     procedure ActionTreeToggleExpand;
+
+    { Pane filters. Currently only the glob is wired (visual dim mode).
+      EntryMatchesFilter returns True if AEntry passes the active filter
+      mask for ASide; default (empty glob) returns True for all. }
+    function EntryMatchesFilter(ASide: TPaneSide; AEntry: IEntry): Boolean;
+    procedure ActionEnterGlobFilter;
 
     { Actions }
     procedure ActionNavigateUp;
@@ -1393,6 +1414,70 @@ begin
   ToggleTreePath(FFocus, Nodes[FCursors[FFocus]].Path);
 end;
 
+{ Recursive glob matcher: '*' matches any run of characters (including
+  empty), '?' matches exactly one character, everything else is matched
+  literally. Both args are expected upper-cased by the caller. }
+function GlobMatch(const APattern, AText: string): Boolean;
+var
+  PI, TI: Integer;
+begin
+  PI := 1; TI := 1;
+  while (PI <= Length(APattern)) and (TI <= Length(AText)) do
+  begin
+    if APattern[PI] = '*' then
+    begin
+      { Skip consecutive '*' }
+      while (PI <= Length(APattern)) and (APattern[PI] = '*') do Inc(PI);
+      if PI > Length(APattern) then Exit(True);
+      { Try every remaining anchor for AText }
+      while TI <= Length(AText) do
+      begin
+        if GlobMatch(Copy(APattern, PI, MaxInt), Copy(AText, TI, MaxInt)) then
+          Exit(True);
+        Inc(TI);
+      end;
+      Exit(False);
+    end
+    else if (APattern[PI] = '?') or (APattern[PI] = AText[TI]) then
+    begin
+      Inc(PI); Inc(TI);
+    end
+    else
+      Exit(False);
+  end;
+  { Trailing '*' on the pattern consumes empty text. }
+  while (PI <= Length(APattern)) and (APattern[PI] = '*') do Inc(PI);
+  Result := (PI > Length(APattern)) and (TI > Length(AText));
+end;
+
+function TTUIController.EntryMatchesFilter(ASide: TPaneSide; AEntry: IEntry): Boolean;
+var
+  Glob, Name: string;
+begin
+  Result := True;
+  if AEntry = nil then Exit;
+  Glob := FFilters[ASide].Glob;
+  if Glob = '' then Exit;
+  { Anchor the pattern with implicit prefix/suffix wildcards if the user
+    didn't supply any, so 'BAS' matches '*BAS*' rather than only literal. }
+  if (Pos('*', Glob) = 0) and (Pos('?', Glob) = 0) then
+    Glob := '*' + Glob + '*';
+  Name := UpperCase(AEntry.DisplayName);
+  Glob := UpperCase(Glob);
+  Result := GlobMatch(Glob, Name);
+end;
+
+procedure TTUIController.ActionEnterGlobFilter;
+var
+  Pattern: string;
+  Ok: Boolean;
+begin
+  Ok := InputDialog('Filter (glob, empty = clear):',
+                    FFilters[FFocus].Glob, Pattern);
+  if Ok then
+    FFilters[FFocus].Glob := Trim(Pattern);
+end;
+
 procedure TTUIController.DrawPane(ASide: TPaneSide; X1, X2: Integer);
 var
   Cont: IContainer;
@@ -1486,6 +1571,14 @@ begin
       ItemAttr := $16
     else
       ItemAttr := BoxAttr;
+
+    { Glob filter: non-matching rows render dimmed so the user can see
+      what they would hide under a future hide-mode filter. Cursor + select
+      colours still win so navigation stays predictable. }
+    if (not IsCursor) and (not IsSelected)
+       and (FFilters[ASide].Glob <> '')
+       and (not EntryMatchesFilter(ASide, Entry)) then
+      ItemAttr := $18;
 
     FOutput.PutText(X1 + 1, Y, LineStr, ItemAttr);
   end;
@@ -3587,6 +3680,12 @@ begin
   FRoles[psRight] := prList;
   FListModes[psLeft] := lmFull;
   FListModes[psRight] := lmFull;
+  FFilters[psLeft].Glob := '';
+  FFilters[psLeft].ShowDeleted := False;
+  FFilters[psLeft].ShowHidden := False;
+  FFilters[psLeft].ShowGuards := True;
+  FFilters[psLeft].UserArea := -1;
+  FFilters[psRight] := FFilters[psLeft];
   FRunning := True;
   FMenuOpen := False;
   FMapScrollX := 0;
@@ -3715,14 +3814,18 @@ begin
         end;
       end
       else
-        case UpCase(AEvent.CharValue) of
-          'W': ActionNavigateUp;
-          'S': ActionNavigateDown;
-          'Q': ActionExit;
-          'M': ActionToggleMap;
-          ' ':
-            if FRoles[FFocus] = prTree then ActionTreeToggleExpand
-            else ActionSelect;
+        case AEvent.CharValue of
+          '+': ActionEnterGlobFilter;
+        else
+          case UpCase(AEvent.CharValue) of
+            'W': ActionNavigateUp;
+            'S': ActionNavigateDown;
+            'Q': ActionExit;
+            'M': ActionToggleMap;
+            ' ':
+              if FRoles[FFocus] = prTree then ActionTreeToggleExpand
+              else ActionSelect;
+          end;
         end;
   else
     { Ignore unknown keys }
