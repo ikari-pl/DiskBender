@@ -1,0 +1,97 @@
+// DiskBender persistent configuration schema.
+//
+// This file is reference documentation; the on-disk encoder/decoder is
+// hand-rolled in `src/units/uPbWire.pas` (the proto3 wire-format subset we
+// need: VARINT + LEN), and the field-by-field mapping lives in
+// `src/units/uConfig.pas`. There is no protoc step.
+//
+// Wire-format compatibility rules (proto3):
+//   - Fields are matched by number, not name. Renaming a field is safe.
+//   - Removing a field is safe; older readers that send it become
+//     unknown-field skips for newer readers.
+//   - Reusing a field number with a different type is NOT safe -- mark
+//     the old number `reserved` and pick a fresh one.
+//   - Enum value `0` is the default when a field is absent on read.
+//     Order matters: keep the historical Pascal ordinal at value 0.
+//
+// Schema version: 1. Bump `schema_version` (Config field 1) when the
+// loader needs to apply migrations.
+
+syntax = "proto3";
+
+package diskbender;
+
+// Mirrors TListMode in uTUIController.pas (Brief / Full / Wide).
+enum ListMode {
+  LIST_MODE_BRIEF = 0;
+  LIST_MODE_FULL  = 1;
+  LIST_MODE_WIDE  = 2;
+}
+
+// Mirrors TPaneRole in uTUIController.pas. Order MUST match the Pascal
+// declaration so Ord(prList)..Ord(prTree) line up with these tags.
+enum PaneRole {
+  PANE_ROLE_LIST        = 0;
+  PANE_ROLE_INFO        = 1;
+  PANE_ROLE_QUICK_VIEW  = 2;
+  PANE_ROLE_SECTOR_MAP  = 3;
+  PANE_ROLE_BLOCK_MAP   = 4;
+  PANE_ROLE_TREE        = 5;
+}
+
+// Mirrors TSortField in uVFS.pas.
+enum SortField {
+  SORT_FIELD_NAME           = 0;
+  SORT_FIELD_EXTENSION      = 1;
+  SORT_FIELD_SIZE           = 2;
+  SORT_FIELD_USER           = 3;
+  SORT_FIELD_DATE           = 4;
+  SORT_FIELD_DATE_CREATED   = 5;
+  SORT_FIELD_DATE_MODIFIED  = 6;
+}
+
+// Mirrors TDateKind in uVFS.pas.
+enum DateKind {
+  DATE_KIND_CREATION     = 0;
+  DATE_KIND_MODIFICATION = 1;
+}
+
+message PaneConfig {
+  ListMode list_mode      = 1;
+  PaneRole role           = 2;
+  SortField sort_field    = 3;
+  bool sort_ascending     = 4;
+  bool dirs_first         = 5;
+  DateKind date_kind      = 6;
+
+  // Filter state. `glob` empty disables the glob filter.
+  string glob             = 7;
+  bool show_deleted       = 8;
+  bool show_hidden        = 9;
+  bool show_guards        = 10;
+  int32 user_area         = 11;   // -1 = all; 0..15 = restrict to that area
+
+  // Tree-mode expand state: list of '/'-joined paths that are currently
+  // expanded. proto3 encodes `repeated string` as one varint-tag-prefixed
+  // entry per element (not packed); the codec writes the same field number
+  // multiple times and the reader appends each occurrence.
+  repeated string tree_expanded = 12;
+
+  // Cursor and scroll positions for next-launch restore.
+  int32 cursor            = 13;
+  int32 scroll            = 14;
+
+  // Last container path so the next launch with no args can rehydrate.
+  // For local: an absolute filesystem path. For DSK: the .dsk file path.
+  string last_path        = 15;
+}
+
+message Config {
+  // Bump when the loader needs to apply migrations. Readers expecting
+  // version N can decline to load a higher-version file rather than risk
+  // misinterpreting renamed fields.
+  uint32 schema_version   = 1;
+
+  PaneConfig left         = 2;
+  PaneConfig right        = 3;
+}
