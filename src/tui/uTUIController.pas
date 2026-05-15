@@ -6,7 +6,7 @@ interface
 
 uses
   SysUtils, Classes, DateUtils, uTerminalIO, uVFS, uExternalDrive,
-  uExternalDriveAsync, uDSKLocation;
+  uExternalDriveAsync, uDSKLocation, uConfig;
 
 type
   TPaneSide = (psLeft, psRight);
@@ -171,6 +171,11 @@ type
     function EntryMatchesFilter(ASide: TPaneSide; AEntry: IEntry): Boolean;
     procedure ActionEnterGlobFilter;
 
+    { Config wiring helpers. Methods (not free functions) because they
+      touch strict-private state. }
+    procedure ApplyPaneConfig(ASide: TPaneSide; const APane: TPaneConfig);
+    function BuildPaneConfig(ASide: TPaneSide): TPaneConfig;
+
     { Actions }
     procedure ActionNavigateUp;
     procedure ActionNavigateDown;
@@ -244,6 +249,16 @@ type
       a scripted key queue without going through a menu action. }
     function RunInputDialogForTest(const APrompt, ADefault: string;
                                    out AText: string): Boolean;
+
+    { Apply a previously-loaded config to the controller's per-pane state.
+      Clamps cursor/scroll to the current container so a stale persisted
+      value can't dangle past the end of a now-smaller listing. Reapplies
+      the sort if the container supports ISortable. Tests don't call this. }
+    procedure ApplyConfig(const ACfg: TDiskBenderConfig);
+
+    { Snapshot the current per-pane state into a TDiskBenderConfig record
+      for SaveConfig. Inverse of ApplyConfig. }
+    function BuildConfig: TDiskBenderConfig;
   end;
 
 implementation
@@ -3858,6 +3873,107 @@ function TTUIController.RunInputDialogForTest(const APrompt, ADefault: string;
                                               out AText: string): Boolean;
 begin
   Result := InputDialog(APrompt, ADefault, AText);
+end;
+
+{ ── Config apply / build ─────────────────────────────────────── }
+
+procedure TTUIController.ApplyPaneConfig(ASide: TPaneSide; const APane: TPaneConfig);
+var
+  Cont: IContainer;
+  Sortable: ISortable;
+  SortF: TSortField;
+  I: Integer;
+begin
+  Cont := ContainerForSide(ASide);
+
+  { List mode + role: the persisted ints are CFG_* constants which match
+    the Pascal ordinals 1:1 by deliberate schema design. Bounds-check
+    defensively in case the file is from a future schema with new values. }
+  if (APane.ListMode >= Ord(Low(TListMode))) and (APane.ListMode <= Ord(High(TListMode))) then
+    FListModes[ASide] := TListMode(APane.ListMode);
+  if (APane.Role >= Ord(Low(TPaneRole))) and (APane.Role <= Ord(High(TPaneRole))) then
+    FRoles[ASide] := TPaneRole(APane.Role);
+
+  { Sort settings. }
+  if (APane.SortField >= Ord(Low(TSortField))) and (APane.SortField <= Ord(High(TSortField))) then
+  begin
+    SortF := TSortField(APane.SortField);
+    FSortField[ASide] := SortF;
+    FSortAscending[ASide] := APane.SortAscending;
+    FDirsFirst[ASide] := APane.DirsFirst;
+    if (Cont <> nil) and Supports(Cont, ISortable, Sortable) then
+      Sortable.Sort(SortF, APane.SortAscending, APane.DirsFirst);
+  end;
+
+  { Date kind. }
+  if (APane.DateKind >= Ord(Low(TDateKind))) and (APane.DateKind <= Ord(High(TDateKind))) then
+    FDateKind[ASide] := TDateKind(APane.DateKind);
+
+  { Filters: only Glob is actively wired; the rest are stored for forward
+    compat once hide-mode lands. }
+  FFilters[ASide].Glob := APane.Glob;
+  FFilters[ASide].ShowDeleted := APane.ShowDeleted;
+  FFilters[ASide].ShowHidden := APane.ShowHidden;
+  FFilters[ASide].ShowGuards := APane.ShowGuards;
+  FFilters[ASide].UserArea := APane.UserArea;
+
+  { Tree expand state. Copy across; the next paint of prTree picks it up. }
+  SetLength(FTreeExpanded[ASide], Length(APane.TreeExpanded));
+  for I := 0 to High(APane.TreeExpanded) do
+    FTreeExpanded[ASide][I] := APane.TreeExpanded[I];
+
+  { Cursor + scroll: clamp to current container size. A persisted cursor
+    past the end of a now-smaller listing would otherwise hide the cursor
+    on first paint. }
+  FCursors[ASide] := APane.Cursor;
+  FScrolls[ASide] := APane.Scroll;
+  if Cont <> nil then
+  begin
+    if FCursors[ASide] < 0 then FCursors[ASide] := 0;
+    if FCursors[ASide] >= Cont.EntryCount then
+      FCursors[ASide] := Cont.EntryCount - 1;
+    if FCursors[ASide] < 0 then FCursors[ASide] := 0;
+    if FScrolls[ASide] < 0 then FScrolls[ASide] := 0;
+    if FScrolls[ASide] > FCursors[ASide] then
+      FScrolls[ASide] := FCursors[ASide];
+  end;
+end;
+
+procedure TTUIController.ApplyConfig(const ACfg: TDiskBenderConfig);
+begin
+  ApplyPaneConfig(psLeft,  ACfg.Left);
+  ApplyPaneConfig(psRight, ACfg.Right);
+end;
+
+function TTUIController.BuildPaneConfig(ASide: TPaneSide): TPaneConfig;
+var
+  I: Integer;
+begin
+  Result := DefaultPaneConfig;
+  Result.ListMode      := Ord(FListModes[ASide]);
+  Result.Role          := Ord(FRoles[ASide]);
+  Result.SortField     := Ord(FSortField[ASide]);
+  Result.SortAscending := FSortAscending[ASide];
+  Result.DirsFirst     := FDirsFirst[ASide];
+  Result.DateKind      := Ord(FDateKind[ASide]);
+  Result.Glob          := FFilters[ASide].Glob;
+  Result.ShowDeleted   := FFilters[ASide].ShowDeleted;
+  Result.ShowHidden    := FFilters[ASide].ShowHidden;
+  Result.ShowGuards    := FFilters[ASide].ShowGuards;
+  Result.UserArea      := FFilters[ASide].UserArea;
+  SetLength(Result.TreeExpanded, Length(FTreeExpanded[ASide]));
+  for I := 0 to High(FTreeExpanded[ASide]) do
+    Result.TreeExpanded[I] := FTreeExpanded[ASide][I];
+  Result.Cursor   := FCursors[ASide];
+  Result.Scroll   := FScrolls[ASide];
+  Result.LastPath := '';   { container path restore not wired yet; field reserved }
+end;
+
+function TTUIController.BuildConfig: TDiskBenderConfig;
+begin
+  Result.SchemaVersion := CONFIG_SCHEMA_VERSION;
+  Result.Left  := BuildPaneConfig(psLeft);
+  Result.Right := BuildPaneConfig(psRight);
 end;
 
 end.

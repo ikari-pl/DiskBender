@@ -7,7 +7,7 @@ uses
   {$IFDEF UNIX}BaseUnix,{$ENDIF}
   uDSK, uCPM, uInterfaces, uFormatters, CoreAPI,
   uVFS, uLocalLocation, uDSKLocation, uTerminalIO, uFPCTerminal, uTUIController,
-  uExternalDrive;
+  uExternalDrive, uConfig;
 
 var
   Disk: IVirtualDisk;
@@ -32,6 +32,32 @@ begin
   Result := (FpFStat(0, St) = 0) and ((St.st_mode and S_IFMT) = S_IFCHR);
 end;
 {$ENDIF}
+
+{ Load persisted config, apply to the controller, Run, then save current
+  state back to disk. Used by both TUI launch paths so persistence is
+  uniform regardless of how the controller was invoked.
+
+  Save is wrapped in a try/except so a write failure (read-only home dir,
+  out-of-space, etc.) doesn't surface as an uncaught exception after the
+  TUI exited cleanly -- the worst case is a missed save, not a crash. }
+procedure RunTUIWithPersistence(ACtrl: TTUIController);
+var
+  Cfg: TDiskBenderConfig;
+  CfgPath: string;
+begin
+  CfgPath := DefaultConfigPath;
+  Cfg := LoadConfig(CfgPath);
+  ACtrl.ApplyConfig(Cfg);
+  try
+    ACtrl.Run;
+  finally
+    try
+      SaveConfig(CfgPath, ACtrl.BuildConfig);
+    except
+      { swallow -- best-effort persistence; the user has already exited }
+    end;
+  end;
+end;
 
 procedure Usage(ExitCode: Integer = 1);
 begin
@@ -327,7 +353,7 @@ begin
     RightCont := TLocalContainer.Create(GetCurrentDir);
     TUICtrl := TTUIController.Create(TUIInput, TUIOutput, LeftCont, RightCont);
     try
-      TUICtrl.Run;
+      RunTUIWithPersistence(TUICtrl);
     finally
       TUICtrl.Free;
     end;
@@ -532,7 +558,7 @@ begin
       RightCont := TLocalContainer.Create(GetCurrentDir);
       TUICtrl := TTUIController.Create(TUIInput, TUIOutput, LeftCont, RightCont);
       try
-        TUICtrl.Run;
+        RunTUIWithPersistence(TUICtrl);
       finally
         TUICtrl.Free;
       end;
