@@ -3147,6 +3147,19 @@ procedure TTUIController.ActionMenu;
 const
   maSort = 0; maSave = 1; maRevert = 2; maBlockMap = 3; maDiskInfo = 4; maSectorMap = 5;
   maHexView = 6; maDriveRead = 7; maDriveWrite = 8;
+  { View / pane-mode items. Each acts on the side the F9 tab bar shows
+    (Left/Right). SwitchMenuSide keeps FFocus in sync with the selected
+    tab, so these all dispatch through FFocus. }
+  maViewBrief    = 100;
+  maViewFull     = 101;
+  maViewWide     = 102;
+  maPaneList     = 103;   { revert to plain list role }
+  maPaneInfo     = 104;
+  maPaneQuick    = 105;
+  maPaneBlockMap = 106;
+  maPaneSectMap  = 107;
+  maPaneTree     = 108;
+  maGlobFilter   = 109;
   BarAttr = $70; BarActiveAttr = $0F;
   MenuAttr = $30; SelAttr = $70;
 type
@@ -3214,6 +3227,37 @@ var
       AddItem('Save         F2', maSave);
       AddItem('Revert', maRevert);
     end;
+
+    { View modes -- always shown so the user can change view on any pane,
+      whether it currently holds a DSK or a local dir. Marks the currently
+      active mode with a '*' prefix so menu state mirrors pane state. }
+    AddItem('', -1, True);
+    if FListModes[FFocus] = lmBrief then AddItem('* Brief',         maViewBrief)
+    else                                  AddItem('  Brief   Alt+1', maViewBrief);
+    if FListModes[FFocus] = lmFull then  AddItem('* Full',          maViewFull)
+    else                                  AddItem('  Full    Alt+2', maViewFull);
+    if FListModes[FFocus] = lmWide then  AddItem('* Wide',          maViewWide)
+    else                                  AddItem('  Wide    Alt+3', maViewWide);
+
+    AddItem('', -1, True);
+    if FRoles[FFocus] = prList then        AddItem('* List',         maPaneList)
+    else                                    AddItem('  List',         maPaneList);
+    if FRoles[FFocus] = prInfo then        AddItem('* Info     Alt+I', maPaneInfo)
+    else                                    AddItem('  Info     Alt+I', maPaneInfo);
+    if FRoles[FFocus] = prQuickView then   AddItem('* QuickV    Alt+Q', maPaneQuick)
+    else                                    AddItem('  QuickV    Alt+Q', maPaneQuick);
+    if FRoles[FFocus] = prBlockMap then    AddItem('* BlockMap  Alt+B', maPaneBlockMap)
+    else                                    AddItem('  BlockMap  Alt+B', maPaneBlockMap);
+    if FRoles[FFocus] = prSectorMap then   AddItem('* SectorMap Alt+M', maPaneSectMap)
+    else                                    AddItem('  SectorMap Alt+M', maPaneSectMap);
+    if FRoles[FFocus] = prTree then        AddItem('* Tree      Alt+T', maPaneTree)
+    else                                    AddItem('  Tree      Alt+T', maPaneTree);
+
+    AddItem('', -1, True);
+    if FFilters[FFocus].Glob <> '' then
+      AddItem('Glob filter [' + FFilters[FFocus].Glob + ']...', maGlobFilter)
+    else
+      AddItem('Glob filter...                +', maGlobFilter);
 
     { Greaseweazle drive actions — always shown so the user can read a disc
       into any pane regardless of what is currently open. }
@@ -3466,6 +3510,24 @@ var
         end;
       maDriveRead:  ActionDriveRead;
       maDriveWrite: ActionDriveWrite;
+      { View / pane mode toggles. SwitchMenuSide keeps FFocus in sync with
+        the menu's Left/Right tab, so SetListMode(FFocus,...) and the role
+        assignment below act on the side the user chose. }
+      maViewBrief: SetListMode(FFocus, lmBrief);
+      maViewFull:  SetListMode(FFocus, lmFull);
+      maViewWide:  SetListMode(FFocus, lmWide);
+      maPaneList:     FRoles[FFocus] := prList;
+      maPaneInfo:     FRoles[FFocus] := prInfo;
+      maPaneQuick:    FRoles[FFocus] := prQuickView;
+      maPaneBlockMap: FRoles[FFocus] := prBlockMap;
+      maPaneSectMap:  FRoles[FFocus] := prSectorMap;
+      maPaneTree:
+        begin
+          FRoles[FFocus] := prTree;
+          FCursors[FFocus] := 0;
+          FScrolls[FFocus] := 0;
+        end;
+      maGlobFilter: ActionEnterGlobFilter;
     end;
   end;
 

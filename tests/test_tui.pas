@@ -1213,8 +1213,10 @@ begin
   try
     Ctrl.HandleEvent(InputEvent(kaF9));
     ScreenText := '';
-    for Y := 2 to 8 do
-      ScreenText := ScreenText + Out_.TextAt(1, Y, 30);
+    { Scan the whole screen height -- the F9 menu now includes view-mode
+      items which push 'Read disc' further down than the original layout. }
+    for Y := 2 to Out_.GetHeight do
+      ScreenText := ScreenText + Out_.TextAt(1, Y, 40);
     { Since Greaseweazle support was added, plain containers still show the
       "Read disc from drive..." item in the F9 menu — so "(no options)" no
       longer appears.  Verify the drive-read item is present instead. }
@@ -3916,6 +3918,80 @@ begin
   end;
 end;
 
+{ ── F9 menu wiring tests ────────────────────────────────────── }
+
+{ The F9 menu must list the new view + pane items so users can reach
+  them without knowing the Alt-key shortcuts. }
+procedure TestF9MenuListsViewItems;
+var
+  Inp: TTestTerminalInput;
+  Out_: TTestTerminalOutput;
+  Ctrl: TTUIController;
+  Left: TTestContainer;
+  Screen: string;
+  Y: Integer;
+begin
+  WriteLn('--- TestF9MenuListsViewItems ---');
+  Inp := MakeInput;
+  Out_ := MakeOutput;
+  Left := TTestContainer.Create('Disk', [
+    TTestFileEntry.Create('HELLO.BAS', 100) as IEntry
+  ]);
+  Inp.Enqueue(kaEsc);
+  Ctrl := TTUIController.Create(ITerminalInput(Inp), ITerminalOutput(Out_),
+                                IContainer(Left), nil);
+  try
+    Ctrl.HandleEvent(InputEvent(kaF9));
+    Screen := '';
+    for Y := 2 to Out_.GetHeight do
+      Screen := Screen + Out_.TextAt(1, Y, Out_.GetWidth);
+    Check('Brief item present',     Pos('Brief',      Screen) > 0);
+    Check('Full item present',      Pos('Full',       Screen) > 0);
+    Check('Wide item present',      Pos('Wide',       Screen) > 0);
+    Check('Info item present',      Pos('Info',       Screen) > 0);
+    Check('QuickV item present',    Pos('QuickV',     Screen) > 0);
+    Check('BlockMap item present',  Pos('BlockMap',   Screen) > 0);
+    Check('SectorMap item present', Pos('SectorMap',  Screen) > 0);
+    Check('Tree item present',      Pos('Tree',       Screen) > 0);
+    Check('Glob filter item present', Pos('Glob filter', Screen) > 0);
+  finally
+    Ctrl.Free;
+  end;
+end;
+
+{ The currently-active list mode is marked with '*' so users can see at
+  a glance which mode is in effect. }
+procedure TestF9MenuMarksActiveListMode;
+var
+  Inp: TTestTerminalInput;
+  Out_: TTestTerminalOutput;
+  Ctrl: TTUIController;
+  Left: TTestContainer;
+  Screen: string;
+  Y: Integer;
+begin
+  WriteLn('--- TestF9MenuMarksActiveListMode ---');
+  Inp := MakeInput;
+  Out_ := MakeOutput;
+  Left := TTestContainer.Create('Disk', [
+    TTestFileEntry.Create('A', 1) as IEntry
+  ]);
+  Inp.Enqueue(kaEsc);
+  Ctrl := TTUIController.Create(ITerminalInput(Inp), ITerminalOutput(Out_),
+                                IContainer(Left), nil);
+  try
+    { Default list mode is lmFull -- expect Full to be starred. }
+    Ctrl.HandleEvent(InputEvent(kaF9));
+    Screen := '';
+    for Y := 2 to Out_.GetHeight do
+      Screen := Screen + Out_.TextAt(1, Y, Out_.GetWidth);
+    Check('Full marked with *', Pos('* Full', Screen) > 0);
+    Check('Brief not marked',   Pos('* Brief', Screen) = 0);
+  finally
+    Ctrl.Free;
+  end;
+end;
+
 { ── Filter (glob) tests ─────────────────────────────────────── }
 
 { Pressing '+' opens an InputDialog. Typing 'BAS' + Enter sets the pane's
@@ -4287,6 +4363,10 @@ begin
   TestFilterGlobDimsNonMatchingRows;
   TestFilterGlobClearRestoresBrightness;
   TestFilterGlobExplicitWildcard;
+
+  { F9 menu wiring }
+  TestF9MenuListsViewItems;
+  TestF9MenuMarksActiveListMode;
 
   WriteLn;
   WriteLn('=== Results: ', PassCount, ' passed, ', FailCount, ' failed ===');
