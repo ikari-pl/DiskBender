@@ -116,6 +116,16 @@ type
     procedure DrawQuickViewPane(ASide: TPaneSide; X1, X2: Integer);
     procedure ActionToggleQuickViewPane;
 
+    { Map panes: tighter half-pane rendering of the OPPOSITE container's
+      block / sector map. Reads IBlockMappable / ISectorMappable from the
+      opposite container directly so the CLI 'disk map' / 'disk sectormap'
+      formatters stay byte-identical. Cursor-entry highlighting is left as
+      a polish follow-up. }
+    procedure DrawBlockMapPane(ASide: TPaneSide; X1, X2: Integer);
+    procedure DrawSectorMapPane(ASide: TPaneSide; X1, X2: Integer);
+    procedure ActionToggleBlockMapPane;
+    procedure ActionToggleSectorMapPane;
+
     { Actions }
     procedure ActionNavigateUp;
     procedure ActionNavigateDown;
@@ -1020,6 +1030,174 @@ begin
     FRoles[Other] := prQuickView;
 end;
 
+procedure TTUIController.DrawBlockMapPane(ASide: TPaneSide; X1, X2: Integer);
+const
+  BLOCKS_PER_ROW = 16;
+  FreeAttr = $18; DirAttr = $1E; UsedAttr = $1B; DelAttr = $1C; HdrAttr = $1F;
+var
+  OtherSide: TPaneSide;
+  OtherCont: IContainer;
+  Mappable: IBlockMappable;
+  Map: TBytes;
+  Total, FreeC, DirC, UsedC, DelC: Integer;
+  BoxAttr, Attr: Byte;
+  Title, S, Ch: string;
+  PW, ContentX, Y, MaxRows: Integer;
+  RowIdx, ColIdx, Idx: Integer;
+begin
+  if FFocus = ASide then BoxAttr := $1F else BoxAttr := $17;
+  PW := X2 - X1 - 1;
+  if ASide = psLeft then OtherSide := psRight else OtherSide := psLeft;
+  OtherCont := ContainerForSide(OtherSide);
+
+  Title := 'Block Map';
+  if OtherCont <> nil then Title := Title + ': ' + OtherCont.Title;
+  DrawBox(X1, 3, X2, FOutput.Height - 1, Title, BoxAttr);
+  FillRect(X1 + 1, 4, X2 - 1, FOutput.Height - 2, BoxAttr);
+
+  if (OtherCont = nil) or not Supports(OtherCont, IBlockMappable, Mappable) then
+  begin
+    FOutput.PutText(X1 + 2, 5, '(no block map for opposite pane)', BoxAttr);
+    Exit;
+  end;
+
+  Map := Mappable.GetBlockMap;
+  Total := Length(Map);
+  if Total = 0 then
+  begin
+    FOutput.PutText(X1 + 2, 5, '(empty block map)', BoxAttr);
+    Exit;
+  end;
+
+  FreeC := 0; DirC := 0; UsedC := 0; DelC := 0;
+  for Idx := 0 to Total - 1 do
+    case Map[Idx] of
+      0: Inc(FreeC); 1: Inc(DirC); 2: Inc(UsedC); 3: Inc(DelC);
+    end;
+
+  S := Format('%d blocks U%d D%d X%d F%d', [Total, UsedC, DirC, DelC, FreeC]);
+  FOutput.PutText(X1 + 2, 4, Copy(S, 1, PW - 2), HdrAttr);
+
+  ContentX := X1 + 2;
+  MaxRows := FOutput.Height - 2 - 6;   { rows 6..Height-2, leaving a header gap }
+  RowIdx := 0;
+  while (RowIdx * BLOCKS_PER_ROW < Total) and (RowIdx < MaxRows) do
+  begin
+    Y := 6 + RowIdx;
+    FOutput.PutText(ContentX, Y, Format('%4.4d:', [RowIdx * BLOCKS_PER_ROW]), $1B);
+    for ColIdx := 0 to BLOCKS_PER_ROW - 1 do
+    begin
+      Idx := RowIdx * BLOCKS_PER_ROW + ColIdx;
+      if Idx >= Total then Break;
+      case Map[Idx] of
+        0: begin Ch := CH_SHADE_LIGHT; Attr := FreeAttr; end;
+        1: begin Ch := CH_FULL;        Attr := DirAttr; end;
+        2: begin Ch := CH_FULL;        Attr := UsedAttr; end;
+        3: begin Ch := CH_FULL;        Attr := DelAttr; end;
+      else
+        begin Ch := '?'; Attr := HdrAttr; end;
+      end;
+      FOutput.PutText(ContentX + 6 + ColIdx, Y, Ch, Attr);
+    end;
+    Inc(RowIdx);
+  end;
+end;
+
+procedure TTUIController.DrawSectorMapPane(ASide: TPaneSide; X1, X2: Integer);
+const
+  EmptyAttr = $18; DataAttr = $1B; SysAttr = $1E;
+  BootAttr  = $1A; NonStdAttr = $1D; FDCErrAttr = $1C;
+var
+  OtherSide: TPaneSide;
+  OtherCont: IContainer;
+  Mappable: ISectorMappable;
+  Tracks: TTrackColumnArray;
+  BoxAttr, Attr: Byte;
+  Title: string;
+  PW, ContentX, Y, MaxRows, MaxSect, MaxSectVisible: Integer;
+  TrackIdx, SectIdx: Integer;
+  Ch: string;
+begin
+  if FFocus = ASide then BoxAttr := $1F else BoxAttr := $17;
+  PW := X2 - X1 - 1;
+  if ASide = psLeft then OtherSide := psRight else OtherSide := psLeft;
+  OtherCont := ContainerForSide(OtherSide);
+
+  Title := 'Sector Map';
+  if OtherCont <> nil then Title := Title + ': ' + OtherCont.Title;
+  DrawBox(X1, 3, X2, FOutput.Height - 1, Title, BoxAttr);
+  FillRect(X1 + 1, 4, X2 - 1, FOutput.Height - 2, BoxAttr);
+
+  if (OtherCont = nil) or not Supports(OtherCont, ISectorMappable, Mappable) then
+  begin
+    FOutput.PutText(X1 + 2, 5, '(no sector map for opposite pane)', BoxAttr);
+    Exit;
+  end;
+
+  Tracks := Mappable.GetSectorMap;
+  if Length(Tracks) = 0 then
+  begin
+    FOutput.PutText(X1 + 2, 5, '(empty sector map)', BoxAttr);
+    Exit;
+  end;
+
+  { Header: "Tracks: N" }
+  FOutput.PutText(X1 + 2, 4, Format('Tracks: %d', [Length(Tracks)]), $1F);
+
+  ContentX := X1 + 2;
+  MaxRows := FOutput.Height - 2 - 6;
+  { Each row: "T00 " prefix (4 chars) + up to MaxSectVisible sector cells }
+  MaxSectVisible := PW - 6;
+  if MaxSectVisible < 1 then MaxSectVisible := 1;
+
+  for TrackIdx := 0 to Length(Tracks) - 1 do
+  begin
+    if TrackIdx >= MaxRows then Break;
+    Y := 6 + TrackIdx;
+    FOutput.PutText(ContentX, Y, Format('T%2.2d ', [Tracks[TrackIdx].TrackNum]), $1B);
+    MaxSect := Length(Tracks[TrackIdx].Sectors);
+    if MaxSect > MaxSectVisible then MaxSect := MaxSectVisible;
+    for SectIdx := 0 to MaxSect - 1 do
+    begin
+      case Tracks[TrackIdx].Sectors[SectIdx].State of
+        ssEmpty:       begin Ch := CH_SHADE_LIGHT; Attr := EmptyAttr; end;
+        ssData:        begin Ch := CH_FULL;        Attr := DataAttr; end;
+        ssSystem:      begin Ch := CH_FULL;        Attr := SysAttr; end;
+        ssBoot:        begin Ch := CH_FULL;        Attr := BootAttr; end;
+        ssNonStandard: begin Ch := CH_FULL;        Attr := NonStdAttr; end;
+        ssFDCError:    begin Ch := 'X';            Attr := FDCErrAttr; end;
+      else
+        begin Ch := '?'; Attr := $1F; end;
+      end;
+      FOutput.PutText(ContentX + 4 + SectIdx, Y, Ch, Attr);
+    end;
+  end;
+end;
+
+procedure TTUIController.ActionToggleBlockMapPane;
+var
+  Other: TPaneSide;
+begin
+  if FFocus = psLeft then Other := psRight else Other := psLeft;
+  if ContainerForSide(Other) = nil then Exit;
+  if FRoles[Other] = prBlockMap then
+    FRoles[Other] := prList
+  else
+    FRoles[Other] := prBlockMap;
+end;
+
+procedure TTUIController.ActionToggleSectorMapPane;
+var
+  Other: TPaneSide;
+begin
+  if FFocus = psLeft then Other := psRight else Other := psLeft;
+  if ContainerForSide(Other) = nil then Exit;
+  if FRoles[Other] = prSectorMap then
+    FRoles[Other] := prList
+  else
+    FRoles[Other] := prSectorMap;
+end;
+
 procedure TTUIController.DrawPane(ASide: TPaneSide; X1, X2: Integer);
 var
   Cont: IContainer;
@@ -1039,6 +1217,8 @@ begin
   case FRoles[ASide] of
     prInfo:      begin DrawInfoPane(ASide, X1, X2); Exit; end;
     prQuickView: begin DrawQuickViewPane(ASide, X1, X2); Exit; end;
+    prBlockMap:  begin DrawBlockMapPane(ASide, X1, X2); Exit; end;
+    prSectorMap: begin DrawSectorMapPane(ASide, X1, X2); Exit; end;
   end;
 
   Cont := ContainerForSide(ASide);
@@ -3318,6 +3498,8 @@ begin
           '3': SetListMode(FFocus, lmWide);
           'I': ActionToggleInfoPane;
           'Q': ActionToggleQuickViewPane;
+          'B': ActionToggleBlockMapPane;
+          'M': ActionToggleSectorMapPane;
         end;
       end
       else

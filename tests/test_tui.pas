@@ -3671,6 +3671,126 @@ begin
   end;
 end;
 
+{ ── Map pane (prBlockMap / prSectorMap) tests ───────────────── }
+
+{ Alt+B sets the opposite pane to prBlockMap and renders the OPPOSITE
+  container's block map. With a TTestSectorContainer in the right pane
+  the left pane (the focused one toggles right's mate, but we toggle
+  from right focus -> left becomes block map) should show the title. }
+procedure TestBlockMapPaneShowsTitle;
+var
+  Inp: TTestTerminalInput;
+  Out_: TTestTerminalOutput;
+  Ctrl: TTUIController;
+  Left, Right: IContainer;
+  Screen: string;
+begin
+  WriteLn('--- TestBlockMapPaneShowsTitle ---');
+  Inp := MakeInput;
+  Out_ := MakeOutput;
+  Left := MakeContainer('LocalLike', 1);  { non-mappable }
+  Right := TTestSectorContainer.Create('DSK', [
+    TTestFileEntry.Create('FOO.COM', 1024) as IEntry
+  ]);
+  Ctrl := TTUIController.Create(ITerminalInput(Inp), ITerminalOutput(Out_), Left, Right);
+  try
+    Ctrl.HandleEvent(InputEvent(kaTab));  { focus right (the mappable side) }
+    Ctrl.HandleEvent(InputEventMod(kaChar, 'B', KM_ALT));  { left pane becomes prBlockMap }
+    Ctrl.RenderForTest;
+    Screen := ScreenDump(Out_);
+    Check('Block Map header visible', Pos('Block Map', Screen) > 0);
+    Check('Container title in header', Pos('DSK', Screen) > 0);
+    { TTestSectorContainer.GetBlockMap is non-trivial; expect non-empty render -- not 'empty'. }
+    Check('Block map not flagged empty', Pos('empty block map', Screen) = 0);
+  finally
+    Ctrl.Free;
+  end;
+end;
+
+{ Non-mappable opposite pane shows a friendly fallback. }
+procedure TestBlockMapPaneNoMapForLocalLike;
+var
+  Inp: TTestTerminalInput;
+  Out_: TTestTerminalOutput;
+  Ctrl: TTUIController;
+  Left, Right: IContainer;
+  Screen: string;
+begin
+  WriteLn('--- TestBlockMapPaneNoMapForLocalLike ---');
+  Inp := MakeInput;
+  Out_ := MakeOutput;
+  Left := MakeContainer('Foo', 2);
+  Right := MakeContainer('Bar', 2);  { both non-mappable }
+  Ctrl := TTUIController.Create(ITerminalInput(Inp), ITerminalOutput(Out_), Left, Right);
+  try
+    Ctrl.HandleEvent(InputEventMod(kaChar, 'B', KM_ALT));
+    Ctrl.RenderForTest;
+    Screen := ScreenDump(Out_);
+    Check('Local container shows no-map fallback', Pos('no block map', Screen) > 0);
+  finally
+    Ctrl.Free;
+  end;
+end;
+
+{ Alt+B twice reverts. }
+procedure TestBlockMapPaneAltBToggleOff;
+var
+  Inp: TTestTerminalInput;
+  Out_: TTestTerminalOutput;
+  Ctrl: TTUIController;
+  Left, Right: IContainer;
+  Screen: string;
+begin
+  WriteLn('--- TestBlockMapPaneAltBToggleOff ---');
+  Inp := MakeInput;
+  Out_ := MakeOutput;
+  Left := TTestSectorContainer.Create('DSK', [
+    TTestFileEntry.Create('A.COM', 1) as IEntry
+  ]);
+  Right := MakeContainer('Local', 1);
+  Ctrl := TTUIController.Create(ITerminalInput(Inp), ITerminalOutput(Out_), Left, Right);
+  try
+    Ctrl.HandleEvent(InputEventMod(kaChar, 'B', KM_ALT));
+    Ctrl.HandleEvent(InputEventMod(kaChar, 'B', KM_ALT));
+    Ctrl.RenderForTest;
+    Screen := ScreenDump(Out_);
+    Check('Block Map header gone', Pos('Block Map', Screen) = 0);
+  finally
+    Ctrl.Free;
+  end;
+end;
+
+{ Alt+M renders the opposite container's sector map (track rows). }
+procedure TestSectorMapPaneShowsTracks;
+var
+  Inp: TTestTerminalInput;
+  Out_: TTestTerminalOutput;
+  Ctrl: TTUIController;
+  Left, Right: IContainer;
+  Screen: string;
+begin
+  WriteLn('--- TestSectorMapPaneShowsTracks ---');
+  Inp := MakeInput;
+  Out_ := MakeOutput;
+  Left := MakeContainer('Local', 1);
+  Right := TTestSectorContainer.Create('DSK', [
+    TTestFileEntry.Create('FOO.COM', 1) as IEntry
+  ]);
+  Ctrl := TTUIController.Create(ITerminalInput(Inp), ITerminalOutput(Out_), Left, Right);
+  try
+    Ctrl.HandleEvent(InputEvent(kaTab));  { focus right }
+    Ctrl.HandleEvent(InputEventMod(kaChar, 'M', KM_ALT));  { left becomes prSectorMap }
+    Ctrl.RenderForTest;
+    Screen := ScreenDump(Out_);
+    Check('Sector Map header visible', Pos('Sector Map', Screen) > 0);
+    Check('Tracks header present', Pos('Tracks:', Screen) > 0);
+    { TTestSectorContainer provides multiple tracks; at least T00 should be drawn. }
+    Check('T00 row label visible', Pos('T00', Screen) > 0);
+  finally
+    Ctrl.Free;
+  end;
+end;
+
 { Bracket conventions survive the Brief layout: angle brackets on directories,
   square brackets on GUARD pseudo-entries, both with full trailing markers. }
 procedure TestBriefGuardsAndDirsBracketsVisible;
@@ -3879,6 +3999,12 @@ begin
   TestQuickViewShowsHexOfCursorEntry;
   TestQuickViewNoPreviewForContainer;
   TestQuickViewAltQToggleOff;
+
+  { Map pane (prBlockMap / prSectorMap) tests }
+  TestBlockMapPaneShowsTitle;
+  TestBlockMapPaneNoMapForLocalLike;
+  TestBlockMapPaneAltBToggleOff;
+  TestSectorMapPaneShowsTracks;
 
   WriteLn;
   WriteLn('=== Results: ', PassCount, ' passed, ', FailCount, ' failed ===');
