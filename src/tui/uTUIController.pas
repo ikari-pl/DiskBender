@@ -23,6 +23,16 @@ type
     companion. Conflating them was why the prior FViewMode rotted. }
   TListMode = (lmBrief, lmFull, lmWide);
 
+  { Flat-list element produced by BuildTreeNodes during a tree-pane render. }
+  TTreeNode = record
+    Entry: IEntry;
+    Depth: Integer;
+    Path: string;           { '/'-joined path from tree root, for expand-state lookup }
+    IsContainer: Boolean;
+    Expanded: Boolean;
+  end;
+  TTreeNodeArray = array of TTreeNode;
+
   TTUIMode = (tmCommander, tmDiskMap, tmSectorMap, tmHex);
 
   TTUIController = class
@@ -43,6 +53,7 @@ type
     FDirsFirst: array[TPaneSide] of Boolean;
     FRoles: array[TPaneSide] of TPaneRole;
     FListModes: array[TPaneSide] of TListMode;
+    FTreeExpanded: array[TPaneSide] of array of string;
     FRunning: Boolean;
     FMenuOpen: Boolean;
     FNowYear: Word;
@@ -125,6 +136,19 @@ type
     procedure DrawSectorMapPane(ASide: TPaneSide; X1, X2: Integer);
     procedure ActionToggleBlockMapPane;
     procedure ActionToggleSectorMapPane;
+
+    { Tree pane (prTree): renders the pane's OWN container as a depth-walked
+      tree, respecting per-pane expand state (FTreeExpanded). Subcontainers
+      show '>' when collapsed, 'v' when expanded; leaves show no marker.
+      Cursor is FCursors[ASide] reused as a flat-list index. }
+    procedure BuildTreeNodes(AContainer: IContainer; ADepth: Integer;
+                             const APathPrefix: string; ASide: TPaneSide;
+                             var ANodes: TTreeNodeArray);
+    procedure DrawTreePane(ASide: TPaneSide; X1, X2: Integer);
+    function IsTreePathExpanded(ASide: TPaneSide; const APath: string): Boolean;
+    procedure ToggleTreePath(ASide: TPaneSide; const APath: string);
+    procedure ActionToggleTreePane;
+    procedure ActionTreeToggleExpand;
 
     { Actions }
     procedure ActionNavigateUp;
@@ -1198,6 +1222,177 @@ begin
     FRoles[Other] := prSectorMap;
 end;
 
+function TTUIController.IsTreePathExpanded(ASide: TPaneSide; const APath: string): Boolean;
+var
+  I: Integer;
+begin
+  for I := 0 to High(FTreeExpanded[ASide]) do
+    if FTreeExpanded[ASide][I] = APath then Exit(True);
+  Result := False;
+end;
+
+procedure TTUIController.ToggleTreePath(ASide: TPaneSide; const APath: string);
+var
+  I, N: Integer;
+begin
+  for I := 0 to High(FTreeExpanded[ASide]) do
+    if FTreeExpanded[ASide][I] = APath then
+    begin
+      { remove }
+      N := Length(FTreeExpanded[ASide]);
+      FTreeExpanded[ASide][I] := FTreeExpanded[ASide][N - 1];
+      SetLength(FTreeExpanded[ASide], N - 1);
+      Exit;
+    end;
+  { add }
+  N := Length(FTreeExpanded[ASide]);
+  SetLength(FTreeExpanded[ASide], N + 1);
+  FTreeExpanded[ASide][N] := APath;
+end;
+
+procedure TTUIController.BuildTreeNodes(AContainer: IContainer; ADepth: Integer;
+                                        const APathPrefix: string; ASide: TPaneSide;
+                                        var ANodes: TTreeNodeArray);
+var
+  I, N: Integer;
+  Entry: IEntry;
+  Sub: IContainer;
+  ChildPath: string;
+  Node: TTreeNode;
+begin
+  if AContainer = nil then Exit;
+  for I := 0 to AContainer.EntryCount - 1 do
+  begin
+    Entry := AContainer.GetEntry(I);
+    if Entry = nil then Continue;
+    { Skip '..' in tree view -- you can't navigate "up" in a tree; collapse
+      the parent or toggle the role to leave. }
+    if Entry.GetName = '..' then Continue;
+    ChildPath := APathPrefix + '/' + Entry.GetName;
+    Node.Entry := Entry;
+    Node.Depth := ADepth;
+    Node.Path := ChildPath;
+    Node.IsContainer := Supports(Entry, IContainer);
+    Node.Expanded := Node.IsContainer and IsTreePathExpanded(ASide, ChildPath);
+    N := Length(ANodes);
+    SetLength(ANodes, N + 1);
+    ANodes[N] := Node;
+    if Node.IsContainer and Node.Expanded and Supports(Entry, IContainer, Sub) then
+      BuildTreeNodes(Sub, ADepth + 1, ChildPath, ASide, ANodes);
+  end;
+end;
+
+procedure TTUIController.DrawTreePane(ASide: TPaneSide; X1, X2: Integer);
+const
+  MaxIndent = 6;          { cap visible depth so deep trees don't push names off-screen }
+var
+  Cont: IContainer;
+  Title: string;
+  BoxAttr, ItemAttr: Byte;
+  PW, Y, MaxRows, I, Idx: Integer;
+  Nodes: TTreeNodeArray;
+  Marker, Line, IndentStr: string;
+  EffDepth: Integer;
+  IsFocused, IsCursor: Boolean;
+begin
+  Cont := ContainerForSide(ASide);
+  if FFocus = ASide then BoxAttr := $1F else BoxAttr := $17;
+  PW := X2 - X1 - 1;
+  IsFocused := FFocus = ASide;
+
+  if Cont <> nil then
+    Title := 'Tree: ' + Cont.Title
+  else
+    Title := 'Tree';
+  DrawBox(X1, 3, X2, FOutput.Height - 1, Title, BoxAttr);
+  FillRect(X1 + 1, 4, X2 - 1, FOutput.Height - 2, BoxAttr);
+
+  if Cont = nil then
+  begin
+    FOutput.PutText(X1 + 2, 5, '(no container)', BoxAttr);
+    Exit;
+  end;
+
+  SetLength(Nodes, 0);
+  BuildTreeNodes(Cont, 0, '', ASide, Nodes);
+
+  if Length(Nodes) = 0 then
+  begin
+    FOutput.PutText(X1 + 2, 5, '(empty)', BoxAttr);
+    Exit;
+  end;
+
+  { Clamp cursor and scroll to the (possibly changed) flat-list size. }
+  if FCursors[ASide] >= Length(Nodes) then FCursors[ASide] := Length(Nodes) - 1;
+  if FCursors[ASide] < 0 then FCursors[ASide] := 0;
+  MaxRows := PaneHeight;
+  if FScrolls[ASide] > FCursors[ASide] then
+    FScrolls[ASide] := FCursors[ASide];
+  if FCursors[ASide] >= FScrolls[ASide] + MaxRows then
+    FScrolls[ASide] := FCursors[ASide] - MaxRows + 1;
+  if FScrolls[ASide] < 0 then FScrolls[ASide] := 0;
+
+  for I := 0 to MaxRows - 1 do
+  begin
+    Idx := FScrolls[ASide] + I;
+    if Idx >= Length(Nodes) then Break;
+    Y := 4 + I;
+
+    EffDepth := Nodes[Idx].Depth;
+    if EffDepth > MaxIndent then EffDepth := MaxIndent;
+    IndentStr := StringOfChar(' ', EffDepth * 2);
+
+    if Nodes[Idx].IsContainer then
+    begin
+      if Nodes[Idx].Expanded then Marker := 'v' else Marker := '>';
+      Marker := Marker + ' ';
+    end
+    else
+      Marker := '  ';
+
+    Line := IndentStr + Marker + Nodes[Idx].Entry.DisplayName;
+    if Length(Line) > PW - 1 then Line := Copy(Line, 1, PW - 2) + '~';
+    Line := Line + StringOfChar(' ', PW - 1 - Length(Line));
+
+    IsCursor := IsFocused and (Idx = FCursors[ASide]);
+    if IsCursor then ItemAttr := $30 else ItemAttr := BoxAttr;
+    FOutput.PutText(X1 + 1, Y, Line, ItemAttr);
+  end;
+end;
+
+procedure TTUIController.ActionToggleTreePane;
+begin
+  if ContainerForSide(FFocus) = nil then Exit;
+  if FRoles[FFocus] = prTree then
+  begin
+    FRoles[FFocus] := prList;
+    { Reset cursor/scroll since their semantics differ between modes. }
+    FCursors[FFocus] := 0;
+    FScrolls[FFocus] := 0;
+  end
+  else
+  begin
+    FRoles[FFocus] := prTree;
+    FCursors[FFocus] := 0;
+    FScrolls[FFocus] := 0;
+  end;
+end;
+
+procedure TTUIController.ActionTreeToggleExpand;
+var
+  Cont: IContainer;
+  Nodes: TTreeNodeArray;
+begin
+  Cont := ContainerForSide(FFocus);
+  if Cont = nil then Exit;
+  SetLength(Nodes, 0);
+  BuildTreeNodes(Cont, 0, '', FFocus, Nodes);
+  if Length(Nodes) = 0 then Exit;
+  if (FCursors[FFocus] < 0) or (FCursors[FFocus] >= Length(Nodes)) then Exit;
+  if not Nodes[FCursors[FFocus]].IsContainer then Exit;
+  ToggleTreePath(FFocus, Nodes[FCursors[FFocus]].Path);
+end;
+
 procedure TTUIController.DrawPane(ASide: TPaneSide; X1, X2: Integer);
 var
   Cont: IContainer;
@@ -1219,6 +1414,7 @@ begin
     prQuickView: begin DrawQuickViewPane(ASide, X1, X2); Exit; end;
     prBlockMap:  begin DrawBlockMapPane(ASide, X1, X2); Exit; end;
     prSectorMap: begin DrawSectorMapPane(ASide, X1, X2); Exit; end;
+    prTree:      begin DrawTreePane(ASide, X1, X2); Exit; end;
   end;
 
   Cont := ContainerForSide(ASide);
@@ -2333,8 +2529,9 @@ end;
 procedure TTUIController.ActionNavigateDown;
 var
   Cont: IContainer;
-  NumCols, Step, NewCursor, ScrollRow, CursorRow: Integer;
+  NumCols, Step, NewCursor, ScrollRow, CursorRow, MaxIdx: Integer;
   HalfWidth: Integer;
+  Nodes: TTreeNodeArray;
 begin
   Cont := ActiveContainer;
   if Cont = nil then Exit;
@@ -2344,9 +2541,21 @@ begin
   else
     NumCols := 1;
   Step := NumCols;
+
+  { Tree mode bounds by the flat-list length, which can exceed or fall
+    short of the container's EntryCount depending on expand state. }
+  if FRoles[FFocus] = prTree then
+  begin
+    SetLength(Nodes, 0);
+    BuildTreeNodes(Cont, 0, '', FFocus, Nodes);
+    MaxIdx := Length(Nodes) - 1;
+  end
+  else
+    MaxIdx := Cont.EntryCount - 1;
+
   NewCursor := ActiveCursor + Step;
-  if NewCursor > Cont.EntryCount - 1 then
-    NewCursor := Cont.EntryCount - 1;
+  if NewCursor > MaxIdx then
+    NewCursor := MaxIdx;
   if NewCursor > ActiveCursor then
   begin
     SetActiveCursor(NewCursor);
@@ -3469,7 +3678,9 @@ begin
     kaEnd:       if FMode = tmSectorMap then ActionMapScrollEnd else ActionEnd;
     kaPageUp:    if FMode <> tmSectorMap then ActionPageUp;
     kaPageDown:  if FMode <> tmSectorMap then ActionPageDown;
-    kaEnter:     ActionEnter;
+    kaEnter:
+      if FRoles[FFocus] = prTree then ActionTreeToggleExpand
+      else ActionEnter;
     kaBackspace: ActionGoBack;
     kaTab:       ActionSwitchPane;
     kaEsc:       ActionExit;
@@ -3500,6 +3711,7 @@ begin
           'Q': ActionToggleQuickViewPane;
           'B': ActionToggleBlockMapPane;
           'M': ActionToggleSectorMapPane;
+          'T': ActionToggleTreePane;
         end;
       end
       else
@@ -3508,7 +3720,9 @@ begin
           'S': ActionNavigateDown;
           'Q': ActionExit;
           'M': ActionToggleMap;
-          ' ': ActionSelect;
+          ' ':
+            if FRoles[FFocus] = prTree then ActionTreeToggleExpand
+            else ActionSelect;
         end;
   else
     { Ignore unknown keys }

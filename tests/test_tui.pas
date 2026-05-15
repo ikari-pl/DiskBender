@@ -3791,6 +3791,131 @@ begin
   end;
 end;
 
+{ ── Tree pane (prTree) tests ────────────────────────────────── }
+
+{ Alt+T renders the focused pane's container as a tree. Top-level entries
+  appear with depth 0; directories show '>' (collapsed) until toggled. }
+procedure TestTreePaneShowsCollapsedContainers;
+var
+  Inp: TTestTerminalInput;
+  Out_: TTestTerminalOutput;
+  Ctrl: TTUIController;
+  Left: TTestContainer;
+  Screen: string;
+begin
+  WriteLn('--- TestTreePaneShowsCollapsedContainers ---');
+  Inp := MakeInput;
+  Out_ := MakeOutput;
+  Left := TTestContainer.Create('Root', [
+    TTestDirEntry.Create('SUB1', []) as IEntry,
+    TTestFileEntry.Create('FILE1.TXT', 100) as IEntry
+  ]);
+  Ctrl := TTUIController.Create(ITerminalInput(Inp), ITerminalOutput(Out_),
+                                IContainer(Left), nil);
+  try
+    Ctrl.HandleEvent(InputEventMod(kaChar, 'T', KM_ALT));
+    Ctrl.RenderForTest;
+    Screen := ScreenDump(Out_);
+    Check('Tree header visible', Pos('Tree: Root', Screen) > 0);
+    Check('Container row shows > marker', Pos('> <SUB1>', Screen) > 0);
+    Check('File row visible (no marker)', Pos('FILE1.TXT', Screen) > 0);
+  finally
+    Ctrl.Free;
+  end;
+end;
+
+{ Space on a container toggles its expand state; nested entries appear
+  indented below their parent. }
+procedure TestTreePaneSpaceExpandsContainer;
+var
+  Inp: TTestTerminalInput;
+  Out_: TTestTerminalOutput;
+  Ctrl: TTUIController;
+  Left: TTestContainer;
+  Screen: string;
+begin
+  WriteLn('--- TestTreePaneSpaceExpandsContainer ---');
+  Inp := MakeInput;
+  Out_ := MakeOutput;
+  Left := TTestContainer.Create('Root', [
+    TTestDirEntry.Create('SUB1', [
+      TTestFileEntry.Create('NESTED.TXT', 50) as IEntry
+    ]) as IEntry
+  ]);
+  Ctrl := TTUIController.Create(ITerminalInput(Inp), ITerminalOutput(Out_),
+                                IContainer(Left), nil);
+  try
+    Ctrl.HandleEvent(InputEventMod(kaChar, 'T', KM_ALT));
+    Ctrl.HandleEvent(InputEvent(kaChar, ' '));  { expand SUB1 }
+    Ctrl.RenderForTest;
+    Screen := ScreenDump(Out_);
+    Check('SUB1 now expanded (v marker)', Pos('v <SUB1>', Screen) > 0);
+    Check('NESTED.TXT visible after expand', Pos('NESTED.TXT', Screen) > 0);
+  finally
+    Ctrl.Free;
+  end;
+end;
+
+{ Space twice collapses again — nested entries disappear. }
+procedure TestTreePaneSpaceTwiceCollapses;
+var
+  Inp: TTestTerminalInput;
+  Out_: TTestTerminalOutput;
+  Ctrl: TTUIController;
+  Left: TTestContainer;
+  Screen: string;
+begin
+  WriteLn('--- TestTreePaneSpaceTwiceCollapses ---');
+  Inp := MakeInput;
+  Out_ := MakeOutput;
+  Left := TTestContainer.Create('Root', [
+    TTestDirEntry.Create('SUB1', [
+      TTestFileEntry.Create('NESTED.TXT', 50) as IEntry
+    ]) as IEntry
+  ]);
+  Ctrl := TTUIController.Create(ITerminalInput(Inp), ITerminalOutput(Out_),
+                                IContainer(Left), nil);
+  try
+    Ctrl.HandleEvent(InputEventMod(kaChar, 'T', KM_ALT));
+    Ctrl.HandleEvent(InputEvent(kaChar, ' '));
+    Ctrl.HandleEvent(InputEvent(kaChar, ' '));
+    Ctrl.RenderForTest;
+    Screen := ScreenDump(Out_);
+    Check('SUB1 back to > marker', Pos('> <SUB1>', Screen) > 0);
+    Check('NESTED.TXT hidden again', Pos('NESTED.TXT', Screen) = 0);
+  finally
+    Ctrl.Free;
+  end;
+end;
+
+{ Alt+T twice reverts to lmFull list rendering. }
+procedure TestTreePaneAltTToggleOff;
+var
+  Inp: TTestTerminalInput;
+  Out_: TTestTerminalOutput;
+  Ctrl: TTUIController;
+  Left: TTestContainer;
+  Screen: string;
+begin
+  WriteLn('--- TestTreePaneAltTToggleOff ---');
+  Inp := MakeInput;
+  Out_ := MakeOutput;
+  Left := TTestContainer.Create('Root', [
+    TTestFileEntry.Create('HELLO.TXT', 100) as IEntry
+  ]);
+  Ctrl := TTUIController.Create(ITerminalInput(Inp), ITerminalOutput(Out_),
+                                IContainer(Left), nil);
+  try
+    Ctrl.HandleEvent(InputEventMod(kaChar, 'T', KM_ALT));
+    Ctrl.HandleEvent(InputEventMod(kaChar, 'T', KM_ALT));
+    Ctrl.RenderForTest;
+    Screen := ScreenDump(Out_);
+    Check('Tree header gone', Pos('Tree:', Screen) = 0);
+  finally
+    Ctrl.Free;
+  end;
+end;
+
 { Bracket conventions survive the Brief layout: angle brackets on directories,
   square brackets on GUARD pseudo-entries, both with full trailing markers. }
 procedure TestBriefGuardsAndDirsBracketsVisible;
@@ -4005,6 +4130,12 @@ begin
   TestBlockMapPaneNoMapForLocalLike;
   TestBlockMapPaneAltBToggleOff;
   TestSectorMapPaneShowsTracks;
+
+  { Tree pane (prTree) tests }
+  TestTreePaneShowsCollapsedContainers;
+  TestTreePaneSpaceExpandsContainer;
+  TestTreePaneSpaceTwiceCollapses;
+  TestTreePaneAltTToggleOff;
 
   WriteLn;
   WriteLn('=== Results: ', PassCount, ' passed, ', FailCount, ' failed ===');
