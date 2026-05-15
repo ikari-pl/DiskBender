@@ -6,7 +6,7 @@ unit uInterfaces;
 interface
 
 uses
-  Classes, SysUtils;
+  Classes, SysUtils, uVFS;
 
 type
   { Fields a filesystem can sort files by. Concrete filesystems may silently
@@ -142,6 +142,12 @@ type
     function GetFileEntryCount(FileIdx: Integer): Integer;
     function GetFileEntryLoc(FileIdx, LocIdx: Integer;
                               out ATrack, ASectorIdx, AEntryIdx: Byte): Boolean;
+
+    { Enumerate the block numbers (0-based, same coordinate system as
+      GetBlockMap) allocated to the file at FileIdx by walking its
+      directory extents' allocation arrays. Returns an empty array for
+      a 0-byte file or an out-of-range FileIdx. }
+    function GetFileBlocks(FileIdx: Integer): TBlockNumberArray;
   end;
 
 implementation

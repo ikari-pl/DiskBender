@@ -1094,16 +1094,22 @@ procedure TTUIController.DrawBlockMapPane(ASide: TPaneSide; X1, X2: Integer);
 const
   BLOCKS_PER_ROW = 16;
   FreeAttr = $18; DirAttr = $1E; UsedAttr = $1B; DelAttr = $1C; HdrAttr = $1F;
+  HighlightAttr = $4F;   { high-intensity white on red -- pops against UsedAttr }
 var
   OtherSide: TPaneSide;
   OtherCont: IContainer;
   Mappable: IBlockMappable;
+  Owning: IBlockOwning;
   Map: TBytes;
+  OwnedBlocks: TBlockNumberArray;
   Total, FreeC, DirC, UsedC, DelC: Integer;
   BoxAttr, Attr: Byte;
   Title, S, Ch: string;
   PW, ContentX, Y, MaxRows: Integer;
-  RowIdx, ColIdx, Idx: Integer;
+  RowIdx, ColIdx, Idx, I: Integer;
+  CursorEntry: IEntry;
+  CursorIdx, OwnedCount: Integer;
+  IsOwned: array of Boolean;
 begin
   if FFocus = ASide then BoxAttr := $1F else BoxAttr := $17;
   PW := X2 - X1 - 1;
@@ -1129,13 +1135,42 @@ begin
     Exit;
   end;
 
+  { Build a fast 'is owned by cursor entry' lookup. The cursor lives on
+    the OPPOSITE (focused) side -- the same side that owns the container
+    being mapped here. If the cursor entry implements IBlockOwning, fetch
+    its block list and pre-populate IsOwned[] for O(1) checks in the
+    render loop. }
+  SetLength(IsOwned, Total);
+  OwnedCount := 0;
+  if OtherCont <> nil then
+  begin
+    CursorIdx := FCursors[OtherSide];
+    if (CursorIdx >= 0) and (CursorIdx < OtherCont.EntryCount) then
+    begin
+      CursorEntry := OtherCont.GetEntry(CursorIdx);
+      if (CursorEntry <> nil) and Supports(CursorEntry, IBlockOwning, Owning) then
+      begin
+        OwnedBlocks := Owning.GetOwnedBlocks;
+        for I := 0 to High(OwnedBlocks) do
+          if (OwnedBlocks[I] < Total) and (not IsOwned[OwnedBlocks[I]]) then
+          begin
+            IsOwned[OwnedBlocks[I]] := True;
+            Inc(OwnedCount);
+          end;
+      end;
+    end;
+  end;
+
   FreeC := 0; DirC := 0; UsedC := 0; DelC := 0;
   for Idx := 0 to Total - 1 do
     case Map[Idx] of
       0: Inc(FreeC); 1: Inc(DirC); 2: Inc(UsedC); 3: Inc(DelC);
     end;
 
-  S := Format('%d blocks U%d D%d X%d F%d', [Total, UsedC, DirC, DelC, FreeC]);
+  if OwnedCount > 0 then
+    S := Format('%d blocks U%d D%d X%d F%d  *%d', [Total, UsedC, DirC, DelC, FreeC, OwnedCount])
+  else
+    S := Format('%d blocks U%d D%d X%d F%d', [Total, UsedC, DirC, DelC, FreeC]);
   FOutput.PutText(X1 + 2, 4, Copy(S, 1, PW - 2), HdrAttr);
 
   ContentX := X1 + 2;
@@ -1157,6 +1192,11 @@ begin
       else
         begin Ch := '?'; Attr := HdrAttr; end;
       end;
+      { Cursor-entry highlight overrides the state colour for blocks owned
+        by the file under the cursor on the opposite (mapped) pane. Wins
+        over Used/Dir/Del so the user sees exactly which blocks belong to
+        the selected file at a glance. }
+      if IsOwned[Idx] then Attr := HighlightAttr;
       FOutput.PutText(ContentX + 6 + ColIdx, Y, Ch, Attr);
     end;
     Inc(RowIdx);

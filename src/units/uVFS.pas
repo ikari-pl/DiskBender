@@ -117,6 +117,19 @@ type
     property BlockCount: Integer read GetBlockCount;
   end;
 
+  { 16-bit block numbers -- CP/M Plus and other DSM > 255 formats need
+    Word range; TBytes would silently truncate. }
+  TBlockNumberArray = array of Word;
+
+  { Capability of an entry that owns specific blocks in its parent container's
+    block map. Implementations enumerate the blocks tied to this entry so
+    callers (notably the Block Map pane) can highlight them. Block numbers
+    are 0-based, the same coordinate system as IBlockMappable.GetBlockMap. }
+  IBlockOwning = interface
+    ['{B0A10001-001A-4C50-8D00-000000000031}']
+    function GetOwnedBlocks: TBlockNumberArray;
+  end;
+
   IPhysicalLayout = interface
     ['{B0A10001-0017-4C50-8D00-000000000017}']
     function GetLayoutInfo: TLayoutInfoArray;

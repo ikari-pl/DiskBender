@@ -3734,6 +3734,64 @@ begin
   end;
 end;
 
+{ When the cursor on the focused (mapped) side rests on an IBlockOwning
+  entry, the Block Map pane highlights that entry's owned blocks in a
+  distinct attribute. Owned blocks get the highlight attr ($4F); other
+  used blocks keep the normal used attr ($1B). }
+procedure TestBlockMapPaneHighlightsCursorFile;
+var
+  Inp: TTestTerminalInput;
+  Out_: TTestTerminalOutput;
+  Ctrl: TTUIController;
+  Left, Right: IContainer;
+  OwnedAttr, OtherAttr: Byte;
+  Y: Integer;
+  RowFound: Integer;
+  Screen: string;
+begin
+  WriteLn('--- TestBlockMapPaneHighlightsCursorFile ---');
+  Inp := MakeInput;
+  Out_ := MakeOutput;
+  Left := MakeContainer('Local', 1);  { non-mappable side -> Block Map pane }
+  { Owning entry claims blocks 5, 6, 7. Container's stock GetBlockMap
+    returns a small populated map regardless of which entry is at the
+    cursor; the highlight test only needs ONE entry to be IBlockOwning. }
+  Right := TTestSectorContainer.Create('DSK', [
+    TTestOwningEntry.Create('FOO.COM', [5, 6, 7]) as IEntry
+  ]);
+  Ctrl := TTUIController.Create(ITerminalInput(Inp), ITerminalOutput(Out_), Left, Right);
+  try
+    Ctrl.HandleEvent(InputEvent(kaTab));  { focus right (the mappable side) }
+    Ctrl.HandleEvent(InputEventMod(kaChar, 'B', KM_ALT));  { left pane prBlockMap }
+    Ctrl.RenderForTest;
+    { Locate the block-map header line by finding the digit row layout:
+      blocks render at ContentX+6+ColIdx on row Y. ContentX = X1+2 = 3
+      for left pane (X1=1). Block 5 is at col 5 of row 0; render Y=6.
+      For our blocks 5/6/7: X = 3 + 6 + 5 = 14, Y = 6. }
+    RowFound := 0;
+    for Y := 4 to Out_.GetHeight do
+    begin
+      if Pos('0000:', Out_.TextAt(1, Y, 10)) > 0 then
+      begin
+        RowFound := Y;
+        Break;
+      end;
+    end;
+    Check('Block 0000 row found', RowFound > 0);
+    if RowFound > 0 then
+    begin
+      OwnedAttr := Out_.AttrAt(3 + 6 + 5, RowFound);   { block index 5 }
+      OtherAttr := Out_.AttrAt(3 + 6 + 0, RowFound);   { block index 0 }
+      Check('Owned block 5 uses highlight attr ($4F)', OwnedAttr = $4F);
+      Check('Non-owned block 0 does not use highlight attr', OtherAttr <> $4F);
+    end;
+    Screen := ScreenDump(Out_);
+    Check('Header shows *3 (3 owned blocks)', Pos('*3', Screen) > 0);
+  finally
+    Ctrl.Free;
+  end;
+end;
+
 { Alt+B twice reverts. }
 procedure TestBlockMapPaneAltBToggleOff;
 var
@@ -4352,6 +4410,7 @@ begin
   TestBlockMapPaneNoMapForLocalLike;
   TestBlockMapPaneAltBToggleOff;
   TestSectorMapPaneShowsTracks;
+  TestBlockMapPaneHighlightsCursorFile;
 
   { Tree pane (prTree) tests }
   TestTreePaneShowsCollapsedContainers;

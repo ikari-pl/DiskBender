@@ -6,7 +6,7 @@ unit uCPM;
 interface
 
 uses
-  Classes, SysUtils, uInterfaces, uCPMTypes, fgl;
+  Classes, SysUtils, uInterfaces, uCPMTypes, uVFS, fgl;
 
 type
   { CP/M Directory Entry (32 bytes) }
@@ -125,6 +125,7 @@ type
     function GetFileEntryCount(FileIdx: Integer): Integer;
     function GetFileEntryLoc(FileIdx, LocIdx: Integer;
                               out ATrack, ASectorIdx, AEntryIdx: Byte): Boolean;
+    function GetFileBlocks(FileIdx: Integer): TBlockNumberArray;
 
     constructor Create(ADisk: IVirtualDisk);
     destructor Destroy; override;
@@ -1066,6 +1067,50 @@ end;
 procedure TDiskBenderCPM.SetDPB(const Value: TCPMDPB);
 begin
   FDPB := Value;
+end;
+
+function TDiskBenderCPM.GetFileBlocks(FileIdx: Integer): TBlockNumberArray;
+var
+  F: TCPMFile;
+  Loc: TCPMEntryLoc;
+  DirSec: TBytes;
+  Entry: TCPMDirEntryPtr;
+  I, B: Integer;
+  BlockIdx, TotalBlocks: Word;
+  Seen: array of Boolean;
+  ResLen: Integer;
+begin
+  SetLength(Result, 0);
+  if (FileIdx < 0) or (FileIdx >= FFiles.Count) then Exit;
+  F := FFiles[FileIdx];
+  if F = nil then Exit;
+
+  TotalBlocks := FDPB.DSM + 1;
+  SetLength(Seen, TotalBlocks);
+  FillChar(Seen[0], TotalBlocks, 0);
+
+  { Walk each directory extent the file owns; for each, pull its allocation
+    slots and collect unique non-zero block numbers. Multiple extents share
+    no blocks in valid CP/M directories, but we dedupe via Seen[] anyway
+    to be defensive against malformed images. }
+  for I := 0 to F.EntryCount - 1 do
+  begin
+    Loc := F.GetEntry(I);
+    DirSec := ReadLogicalSector(Loc.Track, Loc.SectorIdx);
+    if (DirSec = nil) or (Length(DirSec) < (Loc.EntryIdx + 1) * SizeOf(TCPMDirEntry)) then
+      Continue;
+    Entry := TCPMDirEntryPtr(@DirSec[Loc.EntryIdx * SizeOf(TCPMDirEntry)]);
+    for B := 0 to BlocksPerExtent - 1 do
+    begin
+      BlockIdx := GetAllocBlock(Entry, B);
+      if (BlockIdx = 0) or (BlockIdx >= TotalBlocks) then Continue;
+      if Seen[BlockIdx] then Continue;
+      Seen[BlockIdx] := True;
+      ResLen := Length(Result);
+      SetLength(Result, ResLen + 1);
+      Result[ResLen] := BlockIdx;
+    end;
+  end;
 end;
 
 function TDiskBenderCPM.GetFileEntryCount(FileIdx: Integer): Integer;

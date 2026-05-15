@@ -12,7 +12,7 @@ type
     Wraps the old IVirtualFile / TCPMFile model behind VFS interfaces. }
   TCPMFileEntry = class(TInterfacedObject, IEntry, ISizeable, IDeletable,
                         IRestorable, IAttributed, ICopySource, IRenameable,
-                        IUserArea)
+                        IUserArea, IBlockOwning)
   strict private
     FFS: IFilesystem;
     FIndex: Integer;
@@ -44,6 +44,8 @@ type
     procedure Rename(const NewName: string);
     { IUserArea }
     function GetUser: Byte;
+    { IBlockOwning }
+    function GetOwnedBlocks: TBlockNumberArray;
   end;
 
   { Synthetic entry representing boot/system tracks on SYSTEM format disks. }
@@ -258,6 +260,11 @@ end;
 function TCPMFileEntry.GetUser: Byte;
 begin
   Result := FUser;
+end;
+
+function TCPMFileEntry.GetOwnedBlocks: TBlockNumberArray;
+begin
+  Result := FFS.GetFileBlocks(FIndex);
 end;
 
 { ── TDSKContainer ─────────────────────────────────────────────── }

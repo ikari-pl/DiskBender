@@ -170,6 +170,23 @@ type
     function GetDate(AKind: TDateKind): TDateTime;
   end;
 
+  { Test entry that owns a specific list of blocks in its parent container's
+    block map. Used to drive Block Map pane highlight tests. }
+  TTestOwningEntry = class(TInterfacedObject, IEntry, ISizeable, ICopySource,
+                           IBlockOwning)
+  strict private
+    FName: string;
+    FOwned: TBlockNumberArray;
+  public
+    constructor Create(const AName: string; const AOwnedBlocks: array of Word);
+    function GetName: string;
+    function GetDisplayName: string;
+    function GetSize: Int64;
+    function GetSizeUnit: TSizeUnit;
+    procedure CopyTo(AStream: TStream);
+    function GetOwnedBlocks: TBlockNumberArray;
+  end;
+
   TTestUserEntry = class(TInterfacedObject, IEntry, ISizeable, ICopySource,
                          IUserArea, IAttributed)
   strict private
@@ -780,6 +797,46 @@ begin
 end;
 
 { ── TTestUserEntry ──────────────────────────────────────────── }
+
+{ ── TTestOwningEntry ────────────────────────────────────────── }
+
+constructor TTestOwningEntry.Create(const AName: string;
+                                    const AOwnedBlocks: array of Word);
+var
+  I: Integer;
+begin
+  inherited Create;
+  FName := AName;
+  SetLength(FOwned, Length(AOwnedBlocks));
+  for I := 0 to High(AOwnedBlocks) do
+    FOwned[I] := AOwnedBlocks[I];
+end;
+
+function TTestOwningEntry.GetName: string;
+begin Result := FName; end;
+
+function TTestOwningEntry.GetDisplayName: string;
+begin Result := FName; end;
+
+function TTestOwningEntry.GetSize: Int64;
+begin Result := 0; end;
+
+function TTestOwningEntry.GetSizeUnit: TSizeUnit;
+begin Result := suBytes; end;
+
+procedure TTestOwningEntry.CopyTo(AStream: TStream);
+begin
+  { empty -- present only because some helpers expect ICopySource. }
+end;
+
+function TTestOwningEntry.GetOwnedBlocks: TBlockNumberArray;
+var I: Integer;
+begin
+  SetLength(Result, Length(FOwned));
+  for I := 0 to High(FOwned) do Result[I] := FOwned[I];
+end;
+
+{ ── TTestUserEntry ───────────────────────────────────────────── }
 
 constructor TTestUserEntry.Create(const AName: string; ASize: Int64; AUser: Byte);
 begin
