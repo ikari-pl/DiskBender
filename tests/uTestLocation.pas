@@ -170,21 +170,25 @@ type
     function GetDate(AKind: TDateKind): TDateTime;
   end;
 
-  { Test entry that owns a specific list of blocks in its parent container's
-    block map. Used to drive Block Map pane highlight tests. }
+  { Test entry that owns a specific list of blocks AND/OR sectors in its
+    parent container's maps. Used to drive Block/Sector Map pane highlight
+    tests. A sector ref is (track, sectorID). }
   TTestOwningEntry = class(TInterfacedObject, IEntry, ISizeable, ICopySource,
-                           IBlockOwning)
+                           IBlockOwning, ISectorOwning)
   strict private
     FName: string;
     FOwned: TBlockNumberArray;
+    FOwnedSectors: TPhysicalSectorArray;
   public
     constructor Create(const AName: string; const AOwnedBlocks: array of Word);
+    procedure SetOwnedSectors(const APairs: array of Byte);
     function GetName: string;
     function GetDisplayName: string;
     function GetSize: Int64;
     function GetSizeUnit: TSizeUnit;
     procedure CopyTo(AStream: TStream);
     function GetOwnedBlocks: TBlockNumberArray;
+    function GetOwnedSectors: TPhysicalSectorArray;
   end;
 
   TTestUserEntry = class(TInterfacedObject, IEntry, ISizeable, ICopySource,
@@ -834,6 +838,28 @@ var I: Integer;
 begin
   SetLength(Result, Length(FOwned));
   for I := 0 to High(FOwned) do Result[I] := FOwned[I];
+end;
+
+{ APairs is flattened [track0, sectorID0, track1, sectorID1, ...]. Odd
+  length is silently truncated to the last full pair. }
+procedure TTestOwningEntry.SetOwnedSectors(const APairs: array of Byte);
+var
+  I, N: Integer;
+begin
+  N := Length(APairs) div 2;
+  SetLength(FOwnedSectors, N);
+  for I := 0 to N - 1 do
+  begin
+    FOwnedSectors[I].TrackIdx := APairs[I * 2];
+    FOwnedSectors[I].SectorID := APairs[I * 2 + 1];
+  end;
+end;
+
+function TTestOwningEntry.GetOwnedSectors: TPhysicalSectorArray;
+var I: Integer;
+begin
+  SetLength(Result, Length(FOwnedSectors));
+  for I := 0 to High(FOwnedSectors) do Result[I] := FOwnedSectors[I];
 end;
 
 { ── TTestUserEntry ───────────────────────────────────────────── }

@@ -130,6 +130,25 @@ type
     function GetOwnedBlocks: TBlockNumberArray;
   end;
 
+  { Physical sector address: (track index, sector ID). SectorID is the
+    on-disk ID byte (1..9 for CPC DATA), NOT the position within the
+    track -- so values are stable across skew variations. }
+  TPhysicalSectorRef = record
+    TrackIdx: Byte;
+    SectorID: Byte;
+  end;
+  TPhysicalSectorArray = array of TPhysicalSectorRef;
+
+  { Capability of an entry that owns specific physical sectors. Companion
+    to IBlockOwning but in the sector coordinate space, so the Sector Map
+    pane can highlight individual sector cells. Filesystem-level entries
+    compute this by translating their owned blocks through the DPB's
+    geometry (block size, SPT, OFF, skew). }
+  ISectorOwning = interface
+    ['{B0A10001-001B-4C50-8D00-000000000032}']
+    function GetOwnedSectors: TPhysicalSectorArray;
+  end;
+
   IPhysicalLayout = interface
     ['{B0A10001-0017-4C50-8D00-000000000017}']
     function GetLayoutInfo: TLayoutInfoArray;

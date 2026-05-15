@@ -148,6 +148,13 @@ type
       directory extents' allocation arrays. Returns an empty array for
       a 0-byte file or an out-of-range FileIdx. }
     function GetFileBlocks(FileIdx: Integer): TBlockNumberArray;
+
+    { Enumerate the physical (track, sectorID) sectors a file occupies on
+      disk by converting its owned blocks through the DPB's geometry
+      (sectors-per-block, sectors-per-track, OFF reserved tracks) and
+      applying the per-track sector skew via GetSortedSectorIDs. Returns
+      an empty array for a 0-byte file or an out-of-range FileIdx. }
+    function GetFileSectors(FileIdx: Integer): TPhysicalSectorArray;
   end;
 
 implementation

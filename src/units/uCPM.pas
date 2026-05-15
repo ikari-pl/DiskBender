@@ -126,6 +126,7 @@ type
     function GetFileEntryLoc(FileIdx, LocIdx: Integer;
                               out ATrack, ASectorIdx, AEntryIdx: Byte): Boolean;
     function GetFileBlocks(FileIdx: Integer): TBlockNumberArray;
+    function GetFileSectors(FileIdx: Integer): TPhysicalSectorArray;
 
     constructor Create(ADisk: IVirtualDisk);
     destructor Destroy; override;
@@ -1109,6 +1110,52 @@ begin
       ResLen := Length(Result);
       SetLength(Result, ResLen + 1);
       Result[ResLen] := BlockIdx;
+    end;
+  end;
+end;
+
+function TDiskBenderCPM.GetFileSectors(FileIdx: Integer): TPhysicalSectorArray;
+var
+  Blocks: TBlockNumberArray;
+  TI: TTrackInfoBlock;
+  SectorSize, SectorsPerBlock, PhysSPT: Integer;
+  I, S, PhysTrack, PhysSecIdx, ResLen: Integer;
+  BlockIdx: Word;
+  SortedIDs: TBytes;
+  Ref: TPhysicalSectorRef;
+begin
+  SetLength(Result, 0);
+  Blocks := GetFileBlocks(FileIdx);
+  if Length(Blocks) = 0 then Exit;
+
+  { Same geometry derivation as GetFileContent at line ~470. Sample track
+    OFF since data sectors start there and CPC/PCW have uniform geometry
+    across data tracks. }
+  TI := FDisk.GetTrackInfo(FDPB.OFF);
+  if TI.NumSectors = 0 then Exit;
+  SectorSize := 128 shl TI.SectorSize;
+  if SectorSize <= 0 then Exit;
+  SectorsPerBlock := (128 shl FDPB.BSH) div SectorSize;
+  if SectorsPerBlock <= 0 then SectorsPerBlock := 1;
+  PhysSPT := TI.NumSectors;
+
+  for I := 0 to High(Blocks) do
+  begin
+    BlockIdx := Blocks[I];
+    for S := 0 to SectorsPerBlock - 1 do
+    begin
+      PhysTrack  := FDPB.OFF + ((BlockIdx * SectorsPerBlock + S) div PhysSPT);
+      PhysSecIdx := (BlockIdx * SectorsPerBlock + S) mod PhysSPT;
+      { Map the logical sector position within the track to the physical
+        SectorID byte via the per-track sorted ID list (handles CP/M skew). }
+      SortedIDs := FDisk.GetSortedSectorIDs(PhysTrack);
+      if (Length(SortedIDs) = 0) or (PhysSecIdx >= Length(SortedIDs)) then
+        Continue;
+      Ref.TrackIdx := PhysTrack;
+      Ref.SectorID := SortedIDs[PhysSecIdx];
+      ResLen := Length(Result);
+      SetLength(Result, ResLen + 1);
+      Result[ResLen] := Ref;
     end;
   end;
 end;

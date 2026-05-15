@@ -3792,6 +3792,50 @@ begin
   end;
 end;
 
+{ When the cursor on the focused side rests on an ISectorOwning entry,
+  the Sector Map pane highlights that file's owned (track, sectorID)
+  cells with the same HighlightAttr ($4F) as the Block Map pane. }
+procedure TestSectorMapPaneHighlightsCursorFile;
+var
+  Inp: TTestTerminalInput;
+  Out_: TTestTerminalOutput;
+  Ctrl: TTUIController;
+  Left, Right: IContainer;
+  Owner: TTestOwningEntry;
+  Screen: string;
+  AttrOwned, AttrOther: Byte;
+begin
+  WriteLn('--- TestSectorMapPaneHighlightsCursorFile ---');
+  Inp := MakeInput;
+  Out_ := MakeOutput;
+  Left := MakeContainer('Local', 1);
+  Owner := TTestOwningEntry.Create('FOO.COM', []);
+  { Sectors at (track=1, ID=$C3) and (track=2, ID=$C5). TTestSectorContainer
+    lays out sectors in $C1..$C9 order; $C3 = position 2, $C5 = position 4. }
+  Owner.SetOwnedSectors([1, $C3, 2, $C5]);
+  Right := TTestSectorContainer.Create('DSK', [IEntry(Owner)]);
+  Ctrl := TTUIController.Create(ITerminalInput(Inp), ITerminalOutput(Out_), Left, Right);
+  try
+    Ctrl.HandleEvent(InputEvent(kaTab));   { focus right }
+    Ctrl.HandleEvent(InputEventMod(kaChar, 'M', KM_ALT));  { left becomes prSectorMap }
+    Ctrl.RenderForTest;
+    { Track 1 row Y = 6 + 1 = 7; ContentX = 1 + 2 = 3; sectors at X = 3+4+J.
+      $C3 is at position 2 -> X = 9. Track 2 row Y = 8; $C5 at position 4 -> X = 11. }
+    AttrOwned := Out_.AttrAt(9, 7);
+    AttrOther := Out_.AttrAt(7, 7);   { same row, different sector (not owned) }
+    Check('Owned sector ($C3 on track 1) uses highlight attr', AttrOwned = $4F);
+    Check('Non-owned sector ($C1 on track 1) does not', AttrOther <> $4F);
+
+    AttrOwned := Out_.AttrAt(11, 8);  { (track=2, $C5) }
+    Check('Owned sector ($C5 on track 2) uses highlight attr', AttrOwned = $4F);
+
+    Screen := ScreenDump(Out_);
+    Check('Header shows *2 (2 owned sectors)', Pos('*2', Screen) > 0);
+  finally
+    Ctrl.Free;
+  end;
+end;
+
 { Alt+B twice reverts. }
 procedure TestBlockMapPaneAltBToggleOff;
 var
@@ -4411,6 +4455,7 @@ begin
   TestBlockMapPaneAltBToggleOff;
   TestSectorMapPaneShowsTracks;
   TestBlockMapPaneHighlightsCursorFile;
+  TestSectorMapPaneHighlightsCursorFile;
 
   { Tree pane (prTree) tests }
   TestTreePaneShowsCollapsedContainers;

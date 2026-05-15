@@ -1207,15 +1207,31 @@ procedure TTUIController.DrawSectorMapPane(ASide: TPaneSide; X1, X2: Integer);
 const
   EmptyAttr = $18; DataAttr = $1B; SysAttr = $1E;
   BootAttr  = $1A; NonStdAttr = $1D; FDCErrAttr = $1C;
+  HighlightAttr = $4F;   { same highlight attr as the Block Map pane }
+
+  { Linear scan -- typical CP/M file owns <30 sectors. }
+  function IsOwnedSector(const AOwned: TPhysicalSectorArray;
+                         ATrack, ASectorID: Byte): Boolean;
+  var K: Integer;
+  begin
+    for K := 0 to High(AOwned) do
+      if (AOwned[K].TrackIdx = ATrack) and (AOwned[K].SectorID = ASectorID) then
+        Exit(True);
+    Result := False;
+  end;
+
 var
   OtherSide: TPaneSide;
   OtherCont: IContainer;
   Mappable: ISectorMappable;
+  Owning: ISectorOwning;
+  CursorEntry: IEntry;
   Tracks: TTrackColumnArray;
+  Owned: TPhysicalSectorArray;
   BoxAttr, Attr: Byte;
   Title: string;
   PW, ContentX, Y, MaxRows, MaxSect, MaxSectVisible: Integer;
-  TrackIdx, SectIdx: Integer;
+  TrackIdx, SectIdx, CursorIdx: Integer;
   Ch: string;
 begin
   if FFocus = ASide then BoxAttr := $1F else BoxAttr := $17;
@@ -1241,8 +1257,25 @@ begin
     Exit;
   end;
 
-  { Header: "Tracks: N" }
-  FOutput.PutText(X1 + 2, 4, Format('Tracks: %d', [Length(Tracks)]), $1F);
+  { Cursor file's owned (track, sectorID) tuples. Empty if the cursor
+    entry doesn't implement ISectorOwning (e.g. local-FS entries). }
+  SetLength(Owned, 0);
+  if OtherCont <> nil then
+  begin
+    CursorIdx := FCursors[OtherSide];
+    if (CursorIdx >= 0) and (CursorIdx < OtherCont.EntryCount) then
+    begin
+      CursorEntry := OtherCont.GetEntry(CursorIdx);
+      if (CursorEntry <> nil) and Supports(CursorEntry, ISectorOwning, Owning) then
+        Owned := Owning.GetOwnedSectors;
+    end;
+  end;
+
+  { Header: 'Tracks: N' + optional '*K' showing owned-sector count. }
+  if Length(Owned) > 0 then
+    FOutput.PutText(X1 + 2, 4, Format('Tracks: %d  *%d', [Length(Tracks), Length(Owned)]), $1F)
+  else
+    FOutput.PutText(X1 + 2, 4, Format('Tracks: %d', [Length(Tracks)]), $1F);
 
   ContentX := X1 + 2;
   MaxRows := FOutput.Height - 2 - 6;
@@ -1269,6 +1302,12 @@ begin
       else
         begin Ch := '?'; Attr := $1F; end;
       end;
+      { Override state colour for sectors owned by the cursor file. }
+      if (Length(Owned) > 0)
+         and IsOwnedSector(Owned,
+                           Tracks[TrackIdx].TrackNum,
+                           Tracks[TrackIdx].Sectors[SectIdx].SectorID) then
+        Attr := HighlightAttr;
       FOutput.PutText(ContentX + 4 + SectIdx, Y, Ch, Attr);
     end;
   end;
