@@ -11,6 +11,18 @@ uses
 type
   TPaneSide = (psLeft, psRight);
 
+  { Per-pane role: what this pane *is*. prList = browsing its own container.
+    Companion roles (prInfo, prQuickView, prSectorMap, prBlockMap) replace
+    the pane's content with derived data from the OPPOSITE pane's cursor;
+    they are toggled on the focused pane but affect the OPPOSITE one.
+    prTree renders this pane's container as an expandable hierarchy. }
+  TPaneRole = (prList, prInfo, prQuickView, prSectorMap, prBlockMap, prTree);
+
+  { Layout sub-mode for prList. Independent from TPaneRole so the two axes
+    compose cleanly: a pane is either in some list mode, or is acting as a
+    companion. Conflating them was why the prior FViewMode rotted. }
+  TListMode = (lmBrief, lmFull, lmWide);
+
   TTUIMode = (tmCommander, tmDiskMap, tmSectorMap, tmHex);
 
   TTUIController = class
@@ -29,6 +41,8 @@ type
     FSortField: array[TPaneSide] of TSortField;
     FSortAscending: array[TPaneSide] of Boolean;
     FDirsFirst: array[TPaneSide] of Boolean;
+    FRoles: array[TPaneSide] of TPaneRole;
+    FListModes: array[TPaneSide] of TListMode;
     FRunning: Boolean;
     FMenuOpen: Boolean;
     FNowYear: Word;
@@ -537,6 +551,17 @@ var
   PW: Integer;
   IsFocused, IsCursor, IsSelected, ShowDate: Boolean;
 begin
+  { Role dispatch: future companion modes (prInfo, prQuickView, prSectorMap,
+    prBlockMap, prTree) take over rendering when set. For now only prList is
+    implemented; other roles fall through to the list path so a partially-
+    plumbed state still renders something usable. ListMode (lmBrief/lmFull/
+    lmWide) is consulted further down where row rendering happens. }
+  case FRoles[ASide] of
+    prList: ;  { fall through to list rendering below }
+  else
+    ;  { not implemented yet -- fall through }
+  end;
+
   Cont := ContainerForSide(ASide);
 
   if FFocus = ASide then BoxAttr := $1F else BoxAttr := $17;
@@ -2647,6 +2672,10 @@ begin
   FSortAscending[psRight] := True;
   FDirsFirst[psLeft] := True;
   FDirsFirst[psRight] := True;
+  FRoles[psLeft] := prList;
+  FRoles[psRight] := prList;
+  FListModes[psLeft] := lmFull;
+  FListModes[psRight] := lmFull;
   FRunning := True;
   FMenuOpen := False;
   FMapScrollX := 0;
