@@ -170,19 +170,26 @@ type
     function GetDate(AKind: TDateKind): TDateTime;
   end;
 
-  TTestUserEntry = class(TInterfacedObject, IEntry, ISizeable, ICopySource, IUserArea)
+  TTestUserEntry = class(TInterfacedObject, IEntry, ISizeable, ICopySource,
+                         IUserArea, IAttributed)
   strict private
     FName: string;
     FSize: Int64;
     FUser: Byte;
+    FAttrs: TEntryAttributes;
   public
-    constructor Create(const AName: string; ASize: Int64; AUser: Byte);
+    constructor Create(const AName: string; ASize: Int64; AUser: Byte); overload;
+    constructor Create(const AName: string; ASize: Int64; AUser: Byte;
+                       AAttrs: TEntryAttributes); overload;
     function GetName: string;
     function GetDisplayName: string;
     function GetSize: Int64;
     function GetSizeUnit: TSizeUnit;
     procedure CopyTo(AStream: TStream);
     function GetUser: Byte;
+    { IAttributed }
+    function GetAttributes: TEntryAttributes;
+    procedure SetAttributes(AValue: TEntryAttributes);
   end;
 
   TTestSectorContainer = class(TInterfacedObject, IEntry, IContainer, ISortable,
@@ -780,6 +787,27 @@ begin
   FName := AName;
   FSize := ASize;
   FUser := AUser;
+  FAttrs := [];
+end;
+
+constructor TTestUserEntry.Create(const AName: string; ASize: Int64; AUser: Byte;
+                                  AAttrs: TEntryAttributes);
+begin
+  inherited Create;
+  FName := AName;
+  FSize := ASize;
+  FUser := AUser;
+  FAttrs := AAttrs;
+end;
+
+function TTestUserEntry.GetAttributes: TEntryAttributes;
+begin
+  Result := FAttrs;
+end;
+
+procedure TTestUserEntry.SetAttributes(AValue: TEntryAttributes);
+begin
+  FAttrs := AValue;
 end;
 
 function TTestUserEntry.GetName: string;

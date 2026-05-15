@@ -87,8 +87,14 @@ type
     procedure FillRect(X1, Y1, X2, Y2: Integer; AAttr: Byte);
     procedure DrawScrollbar(X, YTop, YBottom, TotalItems, VisibleItems, ScrollOffset: Integer; AAttr: Byte);
 
-    { Entry formatting }
-    function FormatEntry(AEntry: IEntry; AWidth: Integer; AShowDate: Boolean; ADateKind: TDateKind): string;
+    { Entry formatting. AMode selects the layout:
+        lmFull / lmBrief: existing format with optional date column
+        lmWide:           adds 4-char Attr (RSHA, '-' if not set) and
+                          3-char User (CP/M user number, blank otherwise)
+      Brief never actually calls FormatEntry (RenderBriefBody renders name
+      only) but lmBrief is accepted for symmetry. }
+    function FormatEntry(AEntry: IEntry; AWidth: Integer; AShowDate: Boolean;
+                         ADateKind: TDateKind; AMode: TListMode = lmFull): string;
 
     { Brief view (lmBrief) helpers. NumCols depends on pane width and the
       longest DisplayName so brackets on <DIRNAME> / [GUARD#nn] are never
@@ -397,14 +403,47 @@ begin
     Result := Format('%s %2d  %4d', [MonthNames[M], D, Y]);
 end;
 
+{ Returns the 4-char R/S/H/A attribute string for entries that implement
+  IAttributed; '----' for entries that don't (and so don't carry CP/M-style
+  attribute bits at all). }
+function FormatAttrCell(AEntry: IEntry): string;
+var
+  Attr: IAttributed;
+  Flags: TEntryAttributes;
+begin
+  if not Supports(AEntry, IAttributed, Attr) then Exit('----');
+  Flags := Attr.GetAttributes;
+  Result := '';
+  if eaReadOnly in Flags then Result := Result + 'R' else Result := Result + '-';
+  if eaSystem   in Flags then Result := Result + 'S' else Result := Result + '-';
+  if eaHidden   in Flags then Result := Result + 'H' else Result := Result + '-';
+  if eaArchive  in Flags then Result := Result + 'A' else Result := Result + '-';
+end;
+
+{ Returns a 2-char user-area cell ('U%2d' style: '_0', '15', etc.) for
+  entries that implement IUserArea, or two spaces otherwise. The leading
+  underscore on single-digit values is a space; the field is left-padded
+  so CP/M user 0..15 lines up across rows. }
+function FormatUserCell(AEntry: IEntry): string;
+var
+  UA: IUserArea;
+begin
+  if not Supports(AEntry, IUserArea, UA) then Exit('  ');
+  Result := Format('%2d', [UA.User]);
+end;
+
 function TTUIController.FormatEntry(AEntry: IEntry; AWidth: Integer;
-  AShowDate: Boolean; ADateKind: TDateKind): string;
+  AShowDate: Boolean; ADateKind: TDateKind; AMode: TListMode = lmFull): string;
+const
+  ATTR_W = 4;       { 'RSHA' }
+  USER_W = 2;       { ' 0'..'15' }
+  WIDE_EXTRA = ATTR_W + 1 + USER_W;   { + 1 gutter between attr and user }
 var
   Sz: ISizeable;
   Del: IDeletable;
   UA: IUserArea;
   Dt: IDated;
-  Name, SizeStr, DateStr, Prefix: string;
+  Name, SizeStr, DateStr, Prefix, AttrStr, UserStr, Tail: string;
   DateW, NameW: Integer;
 begin
   Name := AEntry.DisplayName;
@@ -427,7 +466,10 @@ begin
   if Supports(AEntry, IDeletable, Del) and Del.IsDeleted then
     Prefix := '*';
 
-  if Supports(AEntry, IUserArea, UA) then
+  { In Wide mode the user number gets its own column so we drop the
+    'N:' prefix to avoid showing it twice. In Full mode it stays as a
+    prefix the way it has been since the user-area work landed. }
+  if (AMode <> lmWide) and Supports(AEntry, IUserArea, UA) then
     Prefix := Prefix + IntToStr(UA.User) + ':';
 
   Name := Prefix + Name;
@@ -436,6 +478,8 @@ begin
     DateW := 13;
 
   NameW := AWidth - 9 - DateW;
+  if AMode = lmWide then
+    Dec(NameW, WIDE_EXTRA + 1);   { + 1 gutter between size/date and attr }
   if (NameW > 1) and (Length(Name) > NameW) then
     Name := Copy(Name, 1, NameW - 1) + '~';
 
@@ -447,8 +491,17 @@ begin
       DateStr := StringOfChar(' ', DateW);
   end;
 
+  if AMode = lmWide then
+  begin
+    AttrStr := FormatAttrCell(AEntry);
+    UserStr := FormatUserCell(AEntry);
+    Tail := DateStr + ' ' + AttrStr + ' ' + UserStr;
+  end
+  else
+    Tail := DateStr;
+
   if NameW > 0 then
-    Result := Format(' %-' + IntToStr(NameW) + 's %7s', [Name, SizeStr]) + DateStr
+    Result := Format(' %-' + IntToStr(NameW) + 's %7s', [Name, SizeStr]) + Tail
   else
     Result := ' ' + Name;
 end;
@@ -729,7 +782,7 @@ begin
     if Entry = nil then Continue;
     Y := 4 + I;
 
-    LineStr := FormatEntry(Entry, PW, ShowDate, FDateKind[ASide]);
+    LineStr := FormatEntry(Entry, PW, ShowDate, FDateKind[ASide], FListModes[ASide]);
     if Length(LineStr) > PW then
       LineStr := Copy(LineStr, 1, PW);
     LineStr := LineStr + StringOfChar(' ', PW - Length(LineStr));

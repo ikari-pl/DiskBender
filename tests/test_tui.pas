@@ -3295,6 +3295,137 @@ begin
   end;
 end;
 
+{ ── Wide view (lmWide) tests ────────────────────────────────── }
+
+{ Attribute column: a CP/M-like entry with R + A flags renders 'R--A',
+  not 'R-A' or 'RA' -- the column is a fixed 4-char R/S/H/A field so
+  vertical alignment survives. }
+procedure TestWideShowsAttrColumn;
+var
+  Inp: TTestTerminalInput;
+  Out_: TTestTerminalOutput;
+  Ctrl: TTUIController;
+  Left: TTestContainer;
+  ScreenText: string;
+  Y: Integer;
+begin
+  WriteLn('--- TestWideShowsAttrColumn ---');
+  Inp := MakeInput;
+  Out_ := MakeOutput;
+  Left := TTestContainer.Create('Disk', [
+    TTestUserEntry.Create('PROTECT.COM', 1024, 0, [eaReadOnly, eaArchive]) as IEntry
+  ]);
+  Ctrl := TTUIController.Create(ITerminalInput(Inp), ITerminalOutput(Out_),
+                                IContainer(Left), nil);
+  try
+    Ctrl.HandleEvent(InputEventMod(kaChar, '3', KM_ALT));
+    Ctrl.RenderForTest;
+    ScreenText := '';
+    for Y := 1 to Out_.GetHeight do
+      ScreenText := ScreenText + Out_.TextAt(1, Y, Out_.GetWidth);
+    Check('Attr column shows R--A', Pos('R--A', ScreenText) > 0);
+  finally
+    Ctrl.Free;
+  end;
+end;
+
+{ User column: an entry with IUserArea user 15 shows '15' (right-padded
+  to 2 chars). The User column lives at the end of the line. }
+procedure TestWideShowsUserColumn;
+var
+  Inp: TTestTerminalInput;
+  Out_: TTestTerminalOutput;
+  Ctrl: TTUIController;
+  Left: TTestContainer;
+  ScreenText: string;
+  Y: Integer;
+begin
+  WriteLn('--- TestWideShowsUserColumn ---');
+  Inp := MakeInput;
+  Out_ := MakeOutput;
+  Left := TTestContainer.Create('Disk', [
+    TTestUserEntry.Create('FOO.COM', 100, 15) as IEntry
+  ]);
+  Ctrl := TTUIController.Create(ITerminalInput(Inp), ITerminalOutput(Out_),
+                                IContainer(Left), nil);
+  try
+    Ctrl.HandleEvent(InputEventMod(kaChar, '3', KM_ALT));
+    Ctrl.RenderForTest;
+    ScreenText := '';
+    for Y := 1 to Out_.GetHeight do
+      ScreenText := ScreenText + Out_.TextAt(1, Y, Out_.GetWidth);
+    { '---- 15' appears as a sequence on the row (attr is empty in Wide for
+      this mock since AAttrs default to [], then space, then user '15'). }
+    Check('User 15 appears in Wide row', Pos('---- 15', ScreenText) > 0);
+  finally
+    Ctrl.Free;
+  end;
+end;
+
+{ Local-style entry (no IAttributed, no IUserArea) shows '----' and a blank
+  user cell, so the Wide row alignment doesn't collapse for those entries. }
+procedure TestWideShowsDashesForNonAttributed;
+var
+  Inp: TTestTerminalInput;
+  Out_: TTestTerminalOutput;
+  Ctrl: TTUIController;
+  Left: IContainer;
+  ScreenText: string;
+  Y: Integer;
+begin
+  WriteLn('--- TestWideShowsDashesForNonAttributed ---');
+  Inp := MakeInput;
+  Out_ := MakeOutput;
+  Left := MakeContainer('LocalLike', 2);  { uses TTestFileEntry, no IAttributed }
+  Ctrl := TTUIController.Create(ITerminalInput(Inp), ITerminalOutput(Out_), Left, nil);
+  try
+    Ctrl.HandleEvent(InputEventMod(kaChar, '3', KM_ALT));
+    Ctrl.RenderForTest;
+    ScreenText := '';
+    for Y := 1 to Out_.GetHeight do
+      ScreenText := ScreenText + Out_.TextAt(1, Y, Out_.GetWidth);
+    Check('Non-attributed entry shows ----', Pos('----', ScreenText) > 0);
+  finally
+    Ctrl.Free;
+  end;
+end;
+
+{ Alt+3 toggles to lmWide. Verify by observing the Attr/User cell appears
+  after the toggle and does NOT appear in the default lmFull. }
+procedure TestWideAlt3ToggleFromFull;
+var
+  Inp: TTestTerminalInput;
+  Out_: TTestTerminalOutput;
+  Ctrl: TTUIController;
+  Left: TTestContainer;
+  ScreenText: string;
+  Y: Integer;
+begin
+  WriteLn('--- TestWideAlt3ToggleFromFull ---');
+  Inp := MakeInput;
+  Out_ := MakeOutput;
+  Left := TTestContainer.Create('Disk', [
+    TTestUserEntry.Create('FOO.COM', 1, 3, [eaSystem]) as IEntry
+  ]);
+  Ctrl := TTUIController.Create(ITerminalInput(Inp), ITerminalOutput(Out_),
+                                IContainer(Left), nil);
+  try
+    Ctrl.RenderForTest;
+    ScreenText := '';
+    for Y := 1 to Out_.GetHeight do
+      ScreenText := ScreenText + Out_.TextAt(1, Y, Out_.GetWidth);
+    Check('lmFull: no -S-- attr cell', Pos('-S--', ScreenText) = 0);
+    Ctrl.HandleEvent(InputEventMod(kaChar, '3', KM_ALT));
+    Ctrl.RenderForTest;
+    ScreenText := '';
+    for Y := 1 to Out_.GetHeight do
+      ScreenText := ScreenText + Out_.TextAt(1, Y, Out_.GetWidth);
+    Check('lmWide: -S-- attr cell visible', Pos('-S--', ScreenText) > 0);
+  finally
+    Ctrl.Free;
+  end;
+end;
+
 { Bracket conventions survive the Brief layout: angle brackets on directories,
   square brackets on GUARD pseudo-entries, both with full trailing markers. }
 procedure TestBriefGuardsAndDirsBracketsVisible;
@@ -3486,6 +3617,12 @@ begin
   TestBriefCursorDownByNumCols;
   TestBriefAlt1ToggleFromFull;
   TestBriefGuardsAndDirsBracketsVisible;
+
+  { Wide view (lmWide) tests }
+  TestWideShowsAttrColumn;
+  TestWideShowsUserColumn;
+  TestWideShowsDashesForNonAttributed;
+  TestWideAlt3ToggleFromFull;
 
   WriteLn;
   WriteLn('=== Results: ', PassCount, ' passed, ', FailCount, ' failed ===');
