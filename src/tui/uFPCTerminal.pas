@@ -541,21 +541,55 @@ end;
 
 { ── Unix: ANSI/UTF-8 terminal output ────────────────────────── }
 
+{ Every TUI attribute byte still encodes "VGA index" (lower nibble = fg,
+  bits 4-6 = bg, bit 7 historically blink/intensity ignored here), but
+  we now translate the indices through this RGB palette and emit the
+  result as a truecolor SGR (38;2;R;G;B / 48;2;R;G;B). Reasons:
+   * Many terminals remap the basic 30-37 / 90-97 codes via theme. A
+     "blue" cell in one terminal can look identical to "magenta" in
+     another. Truecolor specifies the literal RGB triple so renders are
+     consistent everywhere.
+   * The palette can be tuned in one place to match the CLI sectormap's
+     truecolor palette, keeping the TUI and CLI visualizations coherent.
+   * Bg=8..15 (which the old code clamped to bg=0..7) is now reachable.
+
+  Palette values are a modernized VGA — close enough to original
+  intuition that existing code keeps its look, but with slightly muted
+  reds/blues so a full-screen pane isn't fatiguing. Tweak here if you
+  want a different theme. }
 const
-  CGAtoANSI: array[0..7] of Byte = (0, 4, 2, 6, 1, 5, 3, 7);
+  VGA_RGB: array[0..15, 0..2] of Byte = (
+    ( 30,  30,  35),   {  0 black           — slightly bluish, less harsh on OLED }
+    ( 45,  85, 170),   {  1 blue            — pane frame default }
+    ( 70, 160,  70),   {  2 green           — data state }
+    ( 70, 160, 170),   {  3 cyan            — boot state }
+    (190,  60,  60),   {  4 red             — FDC error / W }
+    (180,  70, 180),   {  5 magenta         — twin bg / X }
+    (190, 130,  50),   {  6 brown / orange }
+    (200, 200, 200),   {  7 light gray      — default text }
+    (105, 105, 115),   {  8 dark gray       — dim / disabled }
+    (110, 160, 240),   {  9 light blue }
+    (110, 220, 110),   { 10 light green     — data }
+    (110, 220, 220),   { 11 light cyan      — boot }
+    (240,  90,  90),   { 12 light red       — protection W }
+    (240,  90, 240),   { 13 light magenta   — protection X }
+    (240, 220,  90),   { 14 yellow          — protection L / dir }
+    (245, 245, 245)    { 15 white           — highlight }
+  );
 
 function AttrToSGR(AAttr: Byte): string;
 var
   FG, BG: Byte;
 begin
   FG := AAttr and $0F;
-  BG := (AAttr shr 4) and $07;
-  if FG < 8 then
-    Result := #27'[0;' + IntToStr(30 + CGAtoANSI[FG]) + ';' +
-              IntToStr(40 + CGAtoANSI[BG]) + 'm'
-  else
-    Result := #27'[0;' + IntToStr(90 + CGAtoANSI[FG and 7]) + ';' +
-              IntToStr(40 + CGAtoANSI[BG]) + 'm';
+  BG := (AAttr shr 4) and $0F;
+  Result := #27'[0;38;2;' +
+    IntToStr(VGA_RGB[FG, 0]) + ';' +
+    IntToStr(VGA_RGB[FG, 1]) + ';' +
+    IntToStr(VGA_RGB[FG, 2]) + ';48;2;' +
+    IntToStr(VGA_RGB[BG, 0]) + ';' +
+    IntToStr(VGA_RGB[BG, 1]) + ';' +
+    IntToStr(VGA_RGB[BG, 2]) + 'm';
 end;
 
 function TFPCTerminalOutput.GetWidth: Integer;

@@ -172,6 +172,13 @@ begin
   FHeader.NumSides := Raw[FieldBase + 1];
   if FHeader.NumSides > 2 then FHeader.NumSides := 2;
 
+  { Defense-in-depth absolute cap on NumTracks. Real-world max is ~80 (CPC,
+    PCW); 200 leaves headroom for unusual but plausible images while
+    preventing a crafted header from driving multi-GB allocations even
+    when the file-size check below would otherwise let huge values through
+    (e.g. a sparse stream from a non-FileStream subclass). }
+  if FHeader.NumTracks > 200 then FHeader.NumTracks := 200;
+
   { Sanity-check NumTracks/NumSides against the actual stream size.  Each track
     occupies at least 256 bytes (one Track Info Block header).  Reject obviously
     implausible values before any SetLength call to avoid huge allocations on
@@ -235,6 +242,16 @@ begin
     FDataOffsets[I] := CurrentOffset + 256;
     if FTracks[I].NumSectors > 29 then FTracks[I].NumSectors := 29;
 
+    { Clamp SectorSize codes to 0..6 (128..8192 bytes). The Byte field can
+      legally hold up to 255, but values above 6 would shift the constant
+      128 past Integer's positive range in '128 shl SectorSize' and silently
+      produce negative/overflowed sizes downstream. Clamping at parse time
+      means every downstream '128 shl ...' stays safe. }
+    if FTracks[I].SectorSize > 6 then FTracks[I].SectorSize := 6;
+    for J := 0 to FTracks[I].NumSectors - 1 do
+      if FTracks[I].SectorInfos[J].SectorSize > 6 then
+        FTracks[I].SectorInfos[J].SectorSize := 6;
+
     SetLength(FSectorDataOffsets[I], FTracks[I].NumSectors);
     SectorDataOffset := FDataOffsets[I];
 
@@ -258,13 +275,32 @@ begin
 end;
 
 procedure TDiskBenderDSK.Save;
+var
+  Tmp: string;
 begin
+  { Atomic save: write the full stream to a .tmp side-file, then rename
+    over the original. A crash, full disk, or power loss mid-write now
+    corrupts the .tmp — the previous good DSK on disk stays intact.
+    Without this, FStream.SaveToFile would clobber FFilePath in place,
+    leaving a truncated/half-written image if any I/O step failed.
+    Same pattern as uConfig.SaveConfig. }
+  Tmp := FFilePath + '.tmp';
   try
-    FStream.SaveToFile(FFilePath);
+    FStream.SaveToFile(Tmp);
   except
-    raise;  { do NOT clear FModified on failure — leave state consistent }
+    { Clean up the orphan temp on write failure and re-raise so callers
+      see the error. FModified stays True (state consistent). }
+    if FileExists(Tmp) then DeleteFile(Tmp);
+    raise;
   end;
-  FModified := False;  { only reached when SaveToFile succeeded }
+  { DeleteFile first matches the uConfig precedent (handles Windows too,
+    where RenameFile won't replace an existing file). On POSIX rename(2)
+    is atomic — the tiny window between Delete and Rename only opens a
+    'file briefly absent' race for concurrent readers, which DiskBender
+    doesn't have. }
+  if FileExists(FFilePath) then DeleteFile(FFilePath);
+  RenameFile(Tmp, FFilePath);
+  FModified := False;  { only reached when both SaveToFile + Rename succeeded }
 end;
 
 procedure TDiskBenderDSK.Revert;

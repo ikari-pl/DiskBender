@@ -380,6 +380,64 @@ begin
   end;
 end;
 
+procedure TestBackNavigationCursorByName;
+{ Regression for DiskBender-1r1: ActionGoBack must re-find the previously
+  cursored entry BY NAME after Refresh, so if entries were deleted from
+  the parent container during the sub-navigation the cursor still lands
+  on the same file the user 'came from' — not on whatever entry happens
+  to occupy the numeric index it pushed. }
+var
+  Inp: TTestTerminalInput;
+  Out_: TTestTerminalOutput;
+  Ctrl: TTUIController;
+  A, C: TTestFileEntry;
+  Sub: TTestContainer;
+  Outer: TTestContainer;
+  IdxAfter: Integer;
+  Entry: IEntry;
+begin
+  WriteLn('--- TestBackNavigationCursorByName ---');
+  Inp := MakeInput;
+  Out_ := MakeOutput;
+  { Three siblings: A (file), SUBDIR (container at index 1), C (file). }
+  A := TTestFileEntry.Create('A.TXT', 100);
+  Sub := TTestContainer.Create('SUBDIR', [
+    TTestFileEntry.Create('INSIDE.TXT', 200) as IEntry
+  ]);
+  C := TTestFileEntry.Create('C.TXT', 300);
+  Outer := TTestContainer.Create('Root', [IEntry(A), IEntry(Sub), IEntry(C)]);
+
+  Ctrl := TTUIController.Create(ITerminalInput(Inp), ITerminalOutput(Out_),
+                                IContainer(Outer), nil);
+  try
+    { Move cursor onto SUBDIR (index 1). }
+    Ctrl.HandleEvent(InputEvent(kaDown));
+    Check('Cursor at index 1 (SUBDIR) before Enter',
+          Ctrl.GetCursorPos(psLeft) = 1);
+
+    { Enter SUBDIR — this pushes Outer onto the history stack with
+      CursorName='SUBDIR'. }
+    Ctrl.HandleEvent(InputEvent(kaEnter));
+    Check('Entered SUBDIR', Ctrl.LeftContainer.Title = 'SUBDIR');
+
+    { Now mutate the parent container behind the user's back: delete A.
+      After the next Refresh, SUBDIR will be at index 0 (not 1). }
+    Outer.RemoveEntryAt(0);
+    Check('Outer now has 2 entries', Outer.GetEntryCount = 2);
+
+    { Backspace pops history and must restore the cursor by name. }
+    Ctrl.HandleEvent(InputEvent(kaBackspace));
+    Check('Returned to Root', Ctrl.LeftContainer.Title = 'Root');
+
+    IdxAfter := Ctrl.GetCursorPos(psLeft);
+    Entry := Ctrl.LeftContainer.GetEntry(IdxAfter);
+    Check('Cursor restored by name lands on SUBDIR (not C.TXT)',
+          (Entry <> nil) and (Entry.GetName = 'SUBDIR'));
+  finally
+    Ctrl.Free;
+  end;
+end;
+
 procedure TestScrollbarAppears;
 var
   Inp: TTestTerminalInput;
@@ -4295,6 +4353,7 @@ begin
   TestDrawProducesOutput;
   TestToggleMap;
   TestBackNavigation;
+  TestBackNavigationCursorByName;
   TestScrollbarAppears;
   TestNoScrollbarWhenFits;
   TestMenuOpenClose;

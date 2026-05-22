@@ -70,6 +70,10 @@ type
     procedure Refresh;
     function Import(ASource: ICopySource; const AName: string): Boolean;
     procedure AddEntry(AEntry: IEntry);
+    { Test-only mutation: drop the entry at index I. Used to model
+      sibling deletion that happens while a sub-view is on the history
+      stack — drives the cursor-restore-by-name path in ActionGoBack. }
+    procedure RemoveEntryAt(I: Integer);
   end;
 
   TTestSortableContainer = class(TInterfacedObject, IEntry, IContainer, ISortable)
@@ -496,6 +500,17 @@ procedure TTestContainer.AddEntry(AEntry: IEntry);
 begin
   SetLength(FEntries, Length(FEntries) + 1);
   FEntries[High(FEntries)] := AEntry;
+end;
+
+procedure TTestContainer.RemoveEntryAt(I: Integer);
+var
+  J: Integer;
+begin
+  if (I < 0) or (I >= Length(FEntries)) then Exit;
+  for J := I to High(FEntries) - 1 do
+    FEntries[J] := FEntries[J + 1];
+  FEntries[High(FEntries)] := nil;
+  SetLength(FEntries, Length(FEntries) - 1);
 end;
 
 { ── TTestSortableContainer ──────────────────────────────────── }

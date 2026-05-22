@@ -363,7 +363,11 @@ begin
     SM := nil;
     Cont := nil;
     Result.Success := True;
-    Result.ResultString := TDiskFormatter.FormatSectorMap(SMap, Format);
+    { Enable ANSI color escapes only for the table format on a TTY.
+      Piped/redirected output and JSON output stay plain so captured
+      data can be parsed without stripping escape sequences. }
+    Result.ResultString := TDiskFormatter.FormatSectorMap(SMap, Format,
+      (Format = ofTable) and OutputIsTTY);
   end
   else
   begin

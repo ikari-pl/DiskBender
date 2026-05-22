@@ -309,6 +309,23 @@ begin
   Result := Trim(Result);
 end;
 
+{ Bounds-checked accessor for the (Idx*32)-th 32-byte directory entry inside
+  a sector buffer. Returns False if the buffer is too short to safely
+  dereference. Centralises the guard against Discology-style copy-protected
+  discs where the track's nominal sector size (used to compute EntriesPerSec)
+  exceeds the actual sector data length — without this, @Buf[Idx*32] walks
+  past the buffer end and reads (or, far worse, writes) adjacent heap
+  memory. Every directory-buffer dereference in this unit MUST go through
+  this helper. See the Face 2A nondeterminism investigation for context. }
+function TryGetDirEntry(const Buf: TBytes; Idx: Integer; out Entry: TCPMDirEntryPtr): Boolean;
+begin
+  Entry := nil;
+  if Idx < 0 then Exit(False);
+  if (Idx + 1) * SizeOf(TCPMDirEntry) > Length(Buf) then Exit(False);
+  Entry := TCPMDirEntryPtr(@Buf[Idx * SizeOf(TCPMDirEntry)]);
+  Result := True;
+end;
+
 procedure TDiskBenderCPM.ScanDirectory;
 var
   S, E, I, CurTrack, SecsConsumed: Integer;
@@ -359,7 +376,11 @@ begin
 
     for E := 0 to EntriesPerSec - 1 do
     begin
-      Entry := TCPMDirEntryPtr(@DirSector[E * SizeOf(TCPMDirEntry)]);
+      { TryGetDirEntry is the one-and-only safe way to dereference a 32-byte
+        directory entry — see its declaration for the Discology rationale.
+        Break (not Continue) because once a buffer is too short for index E,
+        every higher E is also out of bounds. }
+      if not TryGetDirEntry(DirSector, E, Entry) then Break;
       if (Entry^.User > CPM_MAX_USER) and (Entry^.User <> CPM_DELETED_USER) then Continue;
 
       { Skip truly empty entries (all bytes $E5 = unused slot) }
@@ -441,7 +462,7 @@ begin
     SecData := ReadLogicalSector(Loc.Track, Loc.SectorIdx);
     if SecData <> nil then
     begin
-      Entry := TCPMDirEntryPtr(@SecData[Loc.EntryIdx * 32]);
+      if not TryGetDirEntry(SecData, Loc.EntryIdx, Entry) then Continue;
       Entry^.User := NewUser;
       WriteLogicalSector(Loc.Track, Loc.SectorIdx, SecData);
     end;
@@ -483,7 +504,7 @@ begin
     DirSector := ReadLogicalSector(Loc.Track, Loc.SectorIdx);
     if DirSector = nil then Continue;
 
-    Entry := TCPMDirEntryPtr(@DirSector[Loc.EntryIdx * SizeOf(TCPMDirEntry)]);
+    if not TryGetDirEntry(DirSector, Loc.EntryIdx, Entry) then Continue;
 
     for B := 0 to BlocksPerExtent - 1 do
     begin
@@ -563,7 +584,8 @@ begin
     begin
       for E := 0 to EntriesPerSec - 1 do
       begin
-        Entry := TCPMDirEntryPtr(@DirSector[E * SizeOf(TCPMDirEntry)]);
+        { TryGetDirEntry is the bounds-checked accessor — see its declaration. }
+        if not TryGetDirEntry(DirSector, E, Entry) then Break;
         if (Entry^.User <= CPM_MAX_USER) then
         begin
           { Anonymous (all-space-name) dir entries are real allocations on
@@ -596,6 +618,22 @@ begin
 end;
 
 function TDiskBenderCPM.GetSectorByID(Track, SectorID: Byte): TBytes;
+{ Map a CP/M sector ID to physical sector data on the given track.
+
+  Contract on duplicate IDs: when a track has multiple physical sectors
+  sharing the same SectorID (the Discology copy-protection "twin sector"
+  trick), this function returns the FIRST match by physical index. This
+  is the correct behaviour for CP/M filesystem operations — CP/M itself
+  only ever sees one sector per ID, and the protected twin is invisible
+  to a normal CP/M loader by design.
+
+  Callers that need to access duplicate-ID twins explicitly (e.g. a hex
+  viewer, copy-protection analyzer) must not use this function — they
+  should index by physical position via FDisk.GetTrackInfo +
+  FDisk.GetSectorData(Track, S) directly. The current callers
+  (LogicalSectorID / ReadLogicalSector / WriteLogicalSector) all operate
+  in CP/M's worldview, so first-match-wins is the right contract for
+  them. See DiskBender-9zn. }
 var
   TI: TTrackInfoBlock;
   S: Integer;
@@ -709,7 +747,7 @@ begin
     SecData := ReadLogicalSector(Loc.Track, Loc.SectorIdx);
     if SecData <> nil then
     begin
-      Entry := TCPMDirEntryPtr(@SecData[Loc.EntryIdx * 32]);
+      if not TryGetDirEntry(SecData, Loc.EntryIdx, Entry) then Continue;
       Move(NameBuf[1], Entry^.Filename, CPM_NAME_LEN);
       Move(ExtBuf[1],  Entry^.Extension, CPM_EXT_LEN);
       WriteLogicalSector(Loc.Track, Loc.SectorIdx, SecData);
@@ -741,7 +779,7 @@ begin
     SecData := ReadLogicalSector(Loc.Track, Loc.SectorIdx);
     if SecData <> nil then
     begin
-      Entry := TCPMDirEntryPtr(@SecData[Loc.EntryIdx * 32]);
+      if not TryGetDirEntry(SecData, Loc.EntryIdx, Entry) then Continue;
       if Entry^.User = CPM_DELETED_USER then
         Entry^.User := 0;
       Entry^.Filename[0] := NewFirstChar;
@@ -797,7 +835,11 @@ begin
     begin
       for I := 0 to EntriesPerSec - 1 do
       begin
-        Entry := TCPMDirEntryPtr(@SecData[I * SizeOf(TCPMDirEntry)]);
+        { Bounds-checked accessor — see TryGetDirEntry declaration for
+          rationale. Short sectors on Discology-style copy-protected discs
+          would otherwise let us return a 'free slot' pointing past the
+          buffer end, and a subsequent AddFile write would corrupt the heap. }
+        if not TryGetDirEntry(SecData, I, Entry) then Break;
         if Entry^.User = CPM_DELETED_USER then
         begin
           Track := CurTrack;
@@ -939,7 +981,11 @@ begin
     if CheckSec <> nil then
       for CheckI := 0 to CheckEntriesPerSec - 1 do
       begin
-        CheckEntry := TCPMDirEntryPtr(@CheckSec[CheckI * SizeOf(TCPMDirEntry)]);
+        { Bounds-checked accessor — see TryGetDirEntry. A short sector here
+          previously over-counted FreeDirSlots based on heap garbage, leading
+          AddFile to believe it had space when FindFreeDirEntry would later
+          fail (or worse, write past the buffer). }
+        if not TryGetDirEntry(CheckSec, CheckI, CheckEntry) then Break;
         if CheckEntry^.User = CPM_DELETED_USER then
           Inc(FreeDirSlots);
       end;
@@ -1014,7 +1060,14 @@ begin
     DirSec := ReadLogicalSector(Track, SecIdx);
     if DirSec = nil then begin NewFile.Free; Exit; end;
 
-    Entry := TCPMDirEntryPtr(@DirSec[EntryIdx * SizeOf(TCPMDirEntry)]);
+    { Bounds check before the 32-byte FillChar — without this, a short
+      sector returned by ReadLogicalSector (Discology-style malformed disc)
+      would cause a 32-byte heap-corrupting write at the buffer tail.
+      FindFreeDirEntry uses the same helper so the slot it returns should
+      always pass this check; we re-verify here because the cost is one
+      compare and the failure mode otherwise is heap corruption. }
+    if not TryGetDirEntry(DirSec, EntryIdx, Entry) then
+    begin NewFile.Free; Exit; end;
     FillChar(Entry^, SizeOf(TCPMDirEntry), 0);
     Move(NameBuf[1], Entry^.Filename, CPM_NAME_LEN);
     Move(ExtBuf[1],  Entry^.Extension, CPM_EXT_LEN);

@@ -197,10 +197,15 @@ type
 
   TSectorCell = record
     SectorID: Byte;
-    SizeBytes: Word;
+    SizeBytes: Word;        { 128 shl SectorInfos[J].SectorSize — IDAM nominal }
     State: TSectorState;
     FDCSt1: Byte;
     FDCSt2: Byte;
+    { Discology-style protection fingerprints. Populated by ComputeSectorMap. }
+    ActualLen: LongInt;     { Length(GetSectorData(...)); may differ from SizeBytes }
+    DeclaredLen: LongInt;   { SectorInfos[J].DataLength — Extended-DSK payload bytes }
+    IsTwin: Boolean;        { another sector on the same track shares this SectorID }
+    IsSuspiciousID: Boolean;{ SectorID outside conventional CPC/PCW ranges }
   end;
 
   TTrackColumn = record

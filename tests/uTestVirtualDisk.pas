@@ -51,6 +51,23 @@ type
     function GetSortedSectorIDs(TrackIdx: Integer): TBytes;
   end;
 
+  { A heterogeneous-geometry mock — track 0 advertises a nominal sector size
+    (e.g. 512 bytes via SectorSizeCode=2) but GetSectorData returns a short
+    buffer (e.g. 2 bytes). Mirrors what Discology-style copy-protected CPC
+    discs do: the IDAM declares one size but the data block was written
+    truncated. Use this to test that every directory-buffer dereference in
+    uCPM.pas respects the actual buffer length and not the nominal geometry.
+    Without the bounds checks this disk causes ScanDirectory to read heap
+    garbage and AddFile/Rename/etc. to corrupt the heap on write. }
+  TMockHeteroDisk = class(TMockVirtualDisk)
+  strict private
+    FShortLen: Integer;     { actual data length to return for track 0 sectors }
+  public
+    constructor Create(ATracks, ASectorsPerTrack, ASectorSizeCode,
+                       ASectorIDBase: Byte; AShortLen: Integer);
+    function GetSectorData(TrackIdx, SectorIdx: Integer): TBytes;
+  end;
+
 implementation
 
 constructor TMockVirtualDisk.Create(ATracks, ASectorsPerTrack, ASectorSizeCode,
@@ -225,6 +242,29 @@ begin
     end;
     Result[J + 1] := Tmp;
   end;
+end;
+
+{ TMockHeteroDisk }
+
+constructor TMockHeteroDisk.Create(ATracks, ASectorsPerTrack, ASectorSizeCode,
+                                   ASectorIDBase: Byte; AShortLen: Integer);
+begin
+  inherited Create(ATracks, ASectorsPerTrack, ASectorSizeCode, ASectorIDBase);
+  FShortLen := AShortLen;
+end;
+
+function TMockHeteroDisk.GetSectorData(TrackIdx, SectorIdx: Integer): TBytes;
+var
+  Full: TBytes;
+begin
+  { Track 0 returns truncated buffers — simulating Discology-style malformed
+    sectors where the IDAM advertises one size but the data block is short.
+    Other tracks use the parent's normal behaviour so the test can still
+    exercise mixed-geometry paths. }
+  Full := inherited GetSectorData(TrackIdx, SectorIdx);
+  if (TrackIdx <> 0) or (Full = nil) then Exit(Full);
+  if Length(Full) <= FShortLen then Exit(Full);
+  Result := Copy(Full, 0, FShortLen);
 end;
 
 end.

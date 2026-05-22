@@ -564,6 +564,31 @@ begin
       Result[I].Sectors[J].SizeBytes := 128 shl TI.SectorInfos[J].SectorSize;
       Result[I].Sectors[J].FDCSt1 := TI.SectorInfos[J].FDCStatus1;
       Result[I].Sectors[J].FDCSt2 := TI.SectorInfos[J].FDCStatus2;
+      Result[I].Sectors[J].DeclaredLen := TI.SectorInfos[J].DataLength;
+
+      { We need GetSectorData anyway for the filler-byte check below; reuse
+        the result to record the actual buffer length. On Discology-style
+        copy-protected discs this routinely differs from the IDAM nominal
+        SizeBytes (e.g. declared 512B / actual 2B) — exposing the mismatch
+        is the whole point of the protection-aware sector map. }
+      Data := FDisk.GetSectorData(I, J);
+      Result[I].Sectors[J].ActualLen := Length(Data);
+
+      { Conventional CPC/PCW SectorID ranges. $00-$1F covers IBM-compat
+        and PCW formats; $41-$49 is CPC SYSTEM; $C1-$C9 is CPC DATA.
+        SectorIDs outside these are Discology fingerprints (e.g. $88,
+        $F3, $74, $E0 seen on Face 2A's protected tail tracks). }
+      Result[I].Sectors[J].IsSuspiciousID :=
+        not ((TI.SectorInfos[J].SectorID <= $1F) or
+             ((TI.SectorInfos[J].SectorID >= $41) and (TI.SectorInfos[J].SectorID <= $49)) or
+             ((TI.SectorInfos[J].SectorID >= $C1) and (TI.SectorInfos[J].SectorID <= $C9)));
+
+      { Twin detection: another sector on this same track has the same ID.
+        Counted by a quick second pass — N is small (<=29) so O(N²) is fine. }
+      Result[I].Sectors[J].IsTwin := False;
+      for K := 0 to TI.NumSectors - 1 do
+        if (K <> J) and (TI.SectorInfos[K].SectorID = TI.SectorInfos[J].SectorID) then
+        begin Result[I].Sectors[J].IsTwin := True; Break; end;
 
       if (TI.SectorInfos[J].FDCStatus1 <> 0) or
          (TI.SectorInfos[J].FDCStatus2 <> 0) then
@@ -572,7 +597,6 @@ begin
         Result[I].Sectors[J].State := ssBoot
       else
       begin
-        Data := FDisk.GetSectorData(I, J);
         AllFiller := True;
         if Data <> nil then
           for K := 0 to Length(Data) - 1 do

@@ -10,7 +10,7 @@ program test_cpm_write;
 {$mode objfpc}{$H+}
 
 uses
-  Classes, SysUtils, uCPM, uDSK, uInterfaces, uTestVirtualDisk,
+  Classes, SysUtils, uCPM, uDSK, uInterfaces, uVFS, uTestVirtualDisk,
   CoreAPI, uFormatters;
 
 const
@@ -240,6 +240,9 @@ var
   AllMatch: Boolean;
   AllocByteOff: Integer;
   ETrack, ESecIdx, EEntIdx: Byte;
+  Blocks: TBlockNumberArray;
+  HasWide: Boolean;
+  BI: Integer;
 begin
   WriteLn('--- 16-bit block allocation (34l) ---');
 
@@ -334,6 +337,21 @@ begin
     Check(True, '16-bit round-trip matches byte-for-byte (2000 bytes)')
   else
     Check(False, Format('Round-trip mismatch at offset %d', [FoundIdx]));
+
+  { Confirm GetFileBlocks decodes 16-bit allocations correctly on DSM>255.
+    The new file landed in blocks 258+, so its decoded block list must
+    contain at least one value > 255 — proving that:
+      (a) TBlockNumberArray (array of Word) carries the full value, not
+          a truncated Byte;
+      (b) GetAllocBlock interprets the Allocations field as little-endian
+          word pairs when Is16BitAlloc is true. }
+  Blocks := FS.GetFileBlocks(Idx);
+  Check(Length(Blocks) > 0, 'GetFileBlocks returned non-empty list for 16-bit file');
+  HasWide := False;
+  for BI := 0 to High(Blocks) do
+    if Blocks[BI] > 255 then begin HasWide := True; Break; end;
+  Check(HasWide, 'GetFileBlocks includes at least one block index > 255 (Word coverage)');
+
   FS := nil;
   Disk := nil;
 end;
@@ -575,6 +593,124 @@ begin
   Disk := nil;
 end;
 
+procedure TestShortSectorBoundsRegression;
+{ Regression for the May-2026 Face-2A buffer-overrun class: a track whose
+  IDAM advertises a 512-byte sector size (SectorSizeCode=2) but whose actual
+  data length is only 32 bytes. Previously every directory loop walked from
+  E=0 to EntriesPerSec-1 (=16) using @Buf[E*32], reading well past the
+  buffer end and (for write paths) corrupting the heap. Each call below
+  exercises a distinct dereference site in uCPM.pas. No assert on file
+  count is made — the contract is "no crash, no out-of-bounds access". }
+var
+  Disk: IVirtualDisk;
+  FS: IFilesystem;
+  Payload: TBytes;
+  Idx: Integer;
+  BMap: TBytes;
+begin
+  WriteLn('--- Short-sector bounds regression (Face 2A class) ---');
+
+  { Track 0 returns 32-byte sectors despite nominal 512. EntriesPerSec
+    based on nominal would be 16; the actual buffer holds only 1 entry. }
+  Disk := TMockHeteroDisk.Create(5, 9, 2, $C1, 32);
+  FS := TDiskBenderCPM.Create(Disk);
+
+  { Read path: ScanDirectory walks the dir buffer. With the fix this must
+    not crash and must not phantom-fabricate entries from heap garbage. }
+  FS.ScanDirectory;
+  Check(True, 'ScanDirectory survives short directory sector');
+
+  { Read path: GetBlockMap walks the same buffer through a separate loop. }
+  BMap := FS.GetBlockMap;
+  Check(Length(BMap) > 0, 'GetBlockMap returns a map (no crash on short sector)');
+
+  { Write path: AddFile's pre-validation, FindFreeDirEntry, and the dir-write
+    FillChar all dereference @Buf[I*32]. Any one of them walking past the
+    buffer would corrupt the heap. The result (success/failure) is less
+    important than the fact that no overrun occurred. }
+  SetLength(Payload, 64);
+  FillChar(Payload[0], 64, $A5);
+  Idx := FS.AddFile('SHORTSEC', 'BIN', Payload, 0);
+  Check(True, 'AddFile survives short directory sectors (idx=' + IntToStr(Idx) + ')');
+
+  FS := nil;
+  Disk := nil;
+end;
+
+procedure TestSectorMapProtectionGlyphs;
+{ Regression for DiskBender-aj7/d8z/57v/2uu/67c: the protection-aware
+  sectormap must surface Discology-style fingerprints (twin SectorIDs,
+  suspicious SectorIDs, length mismatches, weak DataLengths) and NOT
+  truncate the ID column when anomalies are present. Each constructed
+  track exercises one anomaly type. }
+var
+  Tracks: TTrackColumnArray;
+  Out_: string;
+  procedure FillSector(var Cell: TSectorCell; ID: Byte; SizeB, ActLen, DeclLen: LongInt;
+                       St: TSectorState; Twin, Susp: Boolean);
+  begin
+    Cell.SectorID := ID;
+    Cell.SizeBytes := Word(SizeB);
+    Cell.State := St;
+    Cell.FDCSt1 := 0;
+    Cell.FDCSt2 := 0;
+    Cell.ActualLen := ActLen;
+    Cell.DeclaredLen := DeclLen;
+    Cell.IsTwin := Twin;
+    Cell.IsSuspiciousID := Susp;
+  end;
+begin
+  WriteLn('--- Sector map protection glyphs ---');
+  SetLength(Tracks, 4);
+
+  { Track 0: two same-ID twins, normal everything else. }
+  Tracks[0].TrackNum := 0; Tracks[0].SideNum := 0; Tracks[0].FillerByte := $E5;
+  SetLength(Tracks[0].Sectors, 2);
+  FillSector(Tracks[0].Sectors[0], $C1, 512, 512, 512, ssData, True,  False);
+  FillSector(Tracks[0].Sectors[1], $C1, 512, 512, 512, ssData, True,  False);
+
+  { Track 1: suspicious SectorID ($88) outside conventional ranges. }
+  Tracks[1].TrackNum := 1; Tracks[1].SideNum := 0; Tracks[1].FillerByte := $E5;
+  SetLength(Tracks[1].Sectors, 1);
+  FillSector(Tracks[1].Sectors[0], $88, 512, 512, 512, ssData, False, True);
+
+  { Track 2: pure length mismatch — declared and IDAM both say 512, but
+    the buffer holds only 2 bytes. This is the L-but-not-W case. }
+  Tracks[2].TrackNum := 2; Tracks[2].SideNum := 0; Tracks[2].FillerByte := $E5;
+  SetLength(Tracks[2].Sectors, 1);
+  FillSector(Tracks[2].Sectors[0], $02, 512, 2,   512, ssData, False, False);
+
+  { Track 3: pure weak DataLength — IDAM says 128, buffer is 128, but
+    the DataLength field claims 52285. This is the W-but-not-L case. }
+  Tracks[3].TrackNum := 3; Tracks[3].SideNum := 0; Tracks[3].FillerByte := $E5;
+  SetLength(Tracks[3].Sectors, 1);
+  FillSector(Tracks[3].Sectors[0], $03, 128, 128, 52285, ssData, False, False);
+
+  Out_ := TDiskFormatter.FormatSectorMap(Tracks, ofTable);
+
+  Check(Pos('twins=2', Out_) > 0,
+        'Header counter: twins counted');
+  Check(Pos('suspicious_ids=1', Out_) > 0,
+        'Header counter: suspicious_ids counted');
+  Check(Pos('length_mismatch=1', Out_) > 0,
+        'Header counter: length_mismatch counted');
+  Check(Pos('weak_DataLength=1', Out_) > 0,
+        'Header counter: weak_DataLength counted');
+
+  Check(Pos('T', Out_) > 0, 'Twin glyph (T) rendered');
+  Check(Pos('X', Out_) > 0, 'Suspicious-ID glyph (X) rendered');
+  Check(Pos('L', Out_) > 0, 'Length-mismatch glyph (L) rendered');
+  Check(Pos('W', Out_) > 0, 'Weak-DataLength glyph (W) rendered');
+
+  { FPC's Format('%.2x', ...) emits UPPERCASE hex. }
+  Check(Pos('C1*', Out_) > 0,   'Twin marker (*) appears on ID list');
+  Check(Pos('88?', Out_) > 0,   'Suspicious marker (?) appears on ID list');
+  Check(Pos('actual: 2', Out_) > 0,
+        'Follow-on actual line shows truncated buffer size');
+  Check(Pos('52285', Out_) > 0,
+        'Follow-on decl line surfaces hostile DataLength value');
+end;
+
 begin
 
   { Single-block file — exercises the simple path. }
@@ -603,6 +739,12 @@ begin
 
   { I5: in-memory GUARD scenario — AddFile refuses when directory is full. }
   TestInMemoryGuard;
+
+  { Face-2A regression: short sectors must not overrun the directory buffer. }
+  TestShortSectorBoundsRegression;
+
+  { Protection-aware sectormap glyphs + counters. }
+  TestSectorMapProtectionGlyphs;
 
   { CoreAPI verb tests }
   TestCoreAPIList;

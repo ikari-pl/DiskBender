@@ -37,6 +37,22 @@ type
     UserArea: ShortInt;     { reserved -- -1 = all }
   end;
 
+  { History stack entry. Records the container + cursor/scroll position
+    at the moment the user pushed it, so ActionGoBack can restore the
+    visual state instead of resetting to (0, 0). CursorName is the name
+    of the entry under the cursor at push time — used by ActionGoBack
+    to re-find the same entry by identity after Refresh + ReapplySort,
+    so the cursor lands on the same file the user 'came from' even if
+    sort order or list contents changed during the sub-navigation.
+    The numeric Cursor/Scroll values are kept as a fallback for the
+    case where the entry no longer exists (e.g. was deleted). }
+  THistoryEntry = record
+    Cont: IContainer;
+    Cursor: Integer;
+    Scroll: Integer;
+    CursorName: string;
+  end;
+
   { Flat-list element produced by BuildTreeNodes during a tree-pane render. }
   TTreeNode = record
     Entry: IEntry;
@@ -58,7 +74,7 @@ type
     FFocus: TPaneSide;
     FCursors: array[TPaneSide] of Integer;
     FScrolls: array[TPaneSide] of Integer;
-    FHistory: array[TPaneSide] of array of IContainer;
+    FHistory: array[TPaneSide] of array of THistoryEntry;
     FSelections: array[TPaneSide] of array of Boolean;
     FMode: TTUIMode;
     FDateKind: array[TPaneSide] of TDateKind;
@@ -73,6 +89,8 @@ type
     FMenuOpen: Boolean;
     FNowYear: Word;
     FMapScrollX: Integer;
+    FMapScrollY: Integer;              { vertical chunk-row scroll for tmSectorMap }
+    FSmScrollY: array[TPaneSide] of Integer;  { track-row scroll for prSectorMap pane }
     FHexData: TBytes;
     FHexLines: array of string;   { Pre-formatted hex+ascii lines; built in EnterHexMode }
     FHexScroll: Integer;
@@ -89,6 +107,17 @@ type
     function ContainerForSide(ASide: TPaneSide): IContainer;
     procedure ResetSelections(ASide: TPaneSide);
     procedure EnsureSelections(ASide: TPaneSide);
+
+    { Snapshot the active pane (container + cursor + scroll + cursor-entry
+      name) onto the history stack. ActionGoBack pops this and re-finds the
+      entry by name, so a refresh, sort change, or sibling deletion during
+      the sub-navigation does not move the cursor to a stranger. }
+    procedure PushHistory(Cont: IContainer);
+
+    { Linear search for an entry by name in a container. Returns -1 if not
+      found or container is nil. Used by ActionGoBack to re-anchor the cursor
+      after the sub-navigation may have rearranged the list. }
+    function FindEntryByName(Cont: IContainer; const Name: string): Integer;
 
     { Drawing }
     procedure DrawHeader;
@@ -201,6 +230,8 @@ type
     procedure ActionMapScrollRight;
     procedure ActionMapScrollHome;
     procedure ActionMapScrollEnd;
+    procedure ActionMapScrollUp;
+    procedure ActionMapScrollDown;
     procedure ActionHexScrollUp;
     procedure ActionHexScrollDown;
     procedure ActionHexPageUp;
@@ -264,6 +295,19 @@ type
 implementation
 
 { ── Helpers ──────────────────────────────────────────────────── }
+
+{ Clamp Cursor into [0, Count-1]; return 0 when Count<=0 (empty container).
+  Centralises the three-line "max-then-min" pattern that previously
+  appeared in ActionPageDown, ActionGoBack, mouse-click row mapping,
+  ApplyConfig, and the tree-pane render. Pure function — no controller
+  state — so callers can clamp into either FCursors[side] or a local var. }
+function ClampCursor(Cursor, Count: Integer): Integer;
+begin
+  if Count <= 0 then Exit(0);
+  if Cursor < 0 then Exit(0);
+  if Cursor >= Count then Exit(Count - 1);
+  Result := Cursor;
+end;
 
 function TTUIController.ActiveContainer: IContainer;
 begin
@@ -1232,6 +1276,7 @@ var
   Title: string;
   PW, ContentX, Y, MaxRows, MaxSect, MaxSectVisible: Integer;
   TrackIdx, SectIdx, CursorIdx: Integer;
+  NTracks, ScrollY, FirstOwned, LastOwned, Ti, K2: Integer;
   Ch: string;
 begin
   if FFocus = ASide then BoxAttr := $1F else BoxAttr := $17;
@@ -1251,7 +1296,8 @@ begin
   end;
 
   Tracks := Mappable.GetSectorMap;
-  if Length(Tracks) = 0 then
+  NTracks := Length(Tracks);
+  if NTracks = 0 then
   begin
     FOutput.PutText(X1 + 2, 5, '(empty sector map)', BoxAttr);
     Exit;
@@ -1271,22 +1317,46 @@ begin
     end;
   end;
 
-  { Header: 'Tracks: N' + optional '*K' showing owned-sector count. }
-  if Length(Owned) > 0 then
-    FOutput.PutText(X1 + 2, 4, Format('Tracks: %d  *%d', [Length(Tracks), Length(Owned)]), $1F)
-  else
-    FOutput.PutText(X1 + 2, 4, Format('Tracks: %d', [Length(Tracks)]), $1F);
-
   ContentX := X1 + 2;
   MaxRows := FOutput.Height - 2 - 6;
-  { Each row: "T00 " prefix (4 chars) + up to MaxSectVisible sector cells }
-  MaxSectVisible := PW - 6;
+  { Reserve 1 column for the scrollbar; each row: "T00 " (4 chars) + sectors. }
+  MaxSectVisible := PW - 7;
   if MaxSectVisible < 1 then MaxSectVisible := 1;
 
-  for TrackIdx := 0 to Length(Tracks) - 1 do
+  { Autoscroll: find first/last owned track index and adjust the scroll offset
+    to keep the entire owned range visible, biased toward the first owned track. }
+  FirstOwned := MaxInt;
+  LastOwned  := -1;
+  for K2 := 0 to High(Owned) do
+    for Ti := 0 to NTracks - 1 do
+      if Tracks[Ti].TrackNum = Owned[K2].TrackIdx then
+      begin
+        if Ti < FirstOwned then FirstOwned := Ti;
+        if Ti > LastOwned  then LastOwned  := Ti;
+        Break;
+      end;
+  ScrollY := FSmScrollY[ASide];
+  if FirstOwned < MaxInt then
   begin
-    if TrackIdx >= MaxRows then Break;
-    Y := 6 + TrackIdx;
+    if FirstOwned < ScrollY then
+      ScrollY := FirstOwned
+    else if LastOwned >= ScrollY + MaxRows then
+      ScrollY := LastOwned - MaxRows + 1;
+  end;
+  if ScrollY > NTracks - MaxRows then ScrollY := NTracks - MaxRows;
+  if ScrollY < 0 then ScrollY := 0;
+  FSmScrollY[ASide] := ScrollY;
+
+  { Header: 'Tracks: N' + optional '*K' showing owned-sector count. }
+  if Length(Owned) > 0 then
+    FOutput.PutText(X1 + 2, 4, Format('Tracks: %d  *%d', [NTracks, Length(Owned)]), $1F)
+  else
+    FOutput.PutText(X1 + 2, 4, Format('Tracks: %d', [NTracks]), $1F);
+
+  for TrackIdx := ScrollY to NTracks - 1 do
+  begin
+    if TrackIdx - ScrollY >= MaxRows then Break;
+    Y := 6 + (TrackIdx - ScrollY);
     FOutput.PutText(ContentX, Y, Format('T%2.2d ', [Tracks[TrackIdx].TrackNum]), $1B);
     MaxSect := Length(Tracks[TrackIdx].Sectors);
     if MaxSect > MaxSectVisible then MaxSect := MaxSectVisible;
@@ -1311,6 +1381,9 @@ begin
       FOutput.PutText(ContentX + 4 + SectIdx, Y, Ch, Attr);
     end;
   end;
+
+  if NTracks > MaxRows then
+    DrawScrollbar(X2 - 1, 6, 5 + MaxRows, NTracks, MaxRows, ScrollY, BoxAttr);
 end;
 
 procedure TTUIController.ActionToggleBlockMapPane;
@@ -1438,8 +1511,7 @@ begin
   end;
 
   { Clamp cursor and scroll to the (possibly changed) flat-list size. }
-  if FCursors[ASide] >= Length(Nodes) then FCursors[ASide] := Length(Nodes) - 1;
-  if FCursors[ASide] < 0 then FCursors[ASide] := 0;
+  FCursors[ASide] := ClampCursor(FCursors[ASide], Length(Nodes));
   MaxRows := PaneHeight;
   if FScrolls[ASide] > FCursors[ASide] then
     FScrolls[ASide] := FCursors[ASide];
@@ -1844,12 +1916,17 @@ end;
 procedure TTUIController.DrawSectorMap;
 const
   BoxBG = $01;
+  { Twin-sector background tint — distinct from BoxBG so the eye can see
+    twin coverage independent of foreground colour. Magenta on dark blue
+    is unmistakable. }
+  TwinBG = $05;
 var
   Mappable: ISectorMappable;
   Cont: IContainer;
   Tracks: TTrackColumnArray;
   NTracks, MaxChunks, MaxSec: Integer;
-  TrackChunks: array of array of Byte;
+  TrackChunks: array of array of Byte;       { foreground color per chunk }
+  TrackTwins: array of array of Boolean;     { twin-flag per chunk }
   TrackTops: array of array of Boolean;
   TrackSecIDs: array of array of Byte;
   GroupStart, TrackColX, IDColX: array of Integer;
@@ -1858,14 +1935,28 @@ var
   IsDiff: Boolean;
   I, J, K, T, Row, NumChunks, ChunksInSec: Integer;
   DataY, LabelY, ColX: Integer;
+  VisRows, ScreenRow: Integer;
   Attr: Byte;
   Title: string;
+  HasW, HasL, HasX, HasT: Boolean;   { legend conditionality flags }
 
-  function SectorColor(AState: TSectorState): Byte;
+  { Pick a foreground colour for a sector cell, mirroring the CLI's
+    SectorCellChar priority order: X > W > L > state. The TUI doesn't
+    use a separate T glyph here — twin coverage is conveyed via the
+    TwinBG background instead, so all four protection signals can be
+    seen at once even when the cell's foreground is dominated by W/L/X. }
+  function SectorColor(const Cell: TSectorCell): Byte;
   const
-    Colors: array[TSectorState] of Byte = ($08, $0A, $0E, $0B, $0D, $0C);
+    StateColors: array[TSectorState] of Byte = ($08, $0A, $0E, $0B, $0D, $0C);
   begin
-    Result := Colors[AState];
+    if Cell.IsSuspiciousID then Exit($0D);            { light magenta — X }
+    if (Cell.DeclaredLen <> 0) and
+       (LongInt(Cell.SizeBytes) <> Cell.DeclaredLen) then
+      Exit($0C);                                       { light red — W }
+    if (Cell.State <> ssBoot) and (Cell.ActualLen >= 0) and
+       (Cell.ActualLen <> LongInt(Cell.SizeBytes)) then
+      Exit($0E);                                       { yellow — L }
+    Result := StateColors[Cell.State];
   end;
 
 begin
@@ -1884,10 +1975,12 @@ begin
   if NTracks = 0 then Exit;
 
   SetLength(TrackChunks, NTracks);
+  SetLength(TrackTwins, NTracks);
   SetLength(TrackTops, NTracks);
   SetLength(TrackSecIDs, NTracks);
   MaxChunks := 0;
   MaxSec := 0;
+  HasW := False; HasL := False; HasX := False; HasT := False;
   for T := 0 to NTracks - 1 do
   begin
     if Length(Tracks[T].Sectors) > MaxSec then
@@ -1896,16 +1989,29 @@ begin
     for J := 0 to Length(Tracks[T].Sectors) - 1 do
       NumChunks := NumChunks + Tracks[T].Sectors[J].SizeBytes div 256;
     SetLength(TrackChunks[T], NumChunks);
+    SetLength(TrackTwins[T], NumChunks);
     SetLength(TrackTops[T], NumChunks);
     SetLength(TrackSecIDs[T], NumChunks);
     K := 0;
     for J := 0 to Length(Tracks[T].Sectors) - 1 do
     begin
       ChunksInSec := Tracks[T].Sectors[J].SizeBytes div 256;
+      { Sample protection-flag presence so the bottom legend can hide
+        categories that don't apply to this disk. }
+      if Tracks[T].Sectors[J].IsSuspiciousID then HasX := True;
+      if Tracks[T].Sectors[J].IsTwin then HasT := True;
+      if (Tracks[T].Sectors[J].DeclaredLen <> 0) and
+         (LongInt(Tracks[T].Sectors[J].SizeBytes) <> Tracks[T].Sectors[J].DeclaredLen) then
+        HasW := True;
+      if (Tracks[T].Sectors[J].State <> ssBoot) and
+         (Tracks[T].Sectors[J].ActualLen >= 0) and
+         (Tracks[T].Sectors[J].ActualLen <> LongInt(Tracks[T].Sectors[J].SizeBytes)) then
+        HasL := True;
       for I := 0 to ChunksInSec - 1 do
       begin
-        TrackChunks[T][K] := SectorColor(Tracks[T].Sectors[J].State);
-        TrackTops[T][K] := (I = 0) and (J > 0);
+        TrackChunks[T][K] := SectorColor(Tracks[T].Sectors[J]);
+        TrackTwins[T][K]  := Tracks[T].Sectors[J].IsTwin;
+        TrackTops[T][K]   := (I = 0) and (J > 0);
         TrackSecIDs[T][K] := Tracks[T].Sectors[J].SectorID;
         Inc(K);
       end;
@@ -1971,11 +2077,19 @@ begin
   LabelY := 5;
   DataY := LabelY + 2;
 
+  { Vertical scroll: clamp FMapScrollY to the available chunk rows. }
+  VisRows := FOutput.Height - 3 - DataY;
+  if VisRows < 1 then VisRows := 1;
+  if FMapScrollY > MaxChunks - VisRows then FMapScrollY := MaxChunks - VisRows;
+  if FMapScrollY < 0 then FMapScrollY := 0;
+
   Title := Format('%d trk x %d sec', [Length(Tracks), MaxSec]);
   if NGroups > 1 then
     Title := Title + Format('  (%d layouts)', [NGroups]);
   if ScrollX > 0 then
-    Title := Title + Format('  [%d..%d]', [ScrollX, VisLast]);
+    Title := Title + Format('  trk[%d..%d]', [ScrollX, VisLast]);
+  if FMapScrollY > 0 then
+    Title := Title + Format('  row[%d..%d]', [FMapScrollY, FMapScrollY + VisRows - 1]);
   FOutput.PutText(3, 4, Title, $1F);
 
   for G := StartG to VisG do
@@ -1990,15 +2104,15 @@ begin
     FOutput.PutText(ColX, LabelY + 1, Chr(Ord('0') + (T mod 10)), $17);
   end;
 
-  for Row := 0 to MaxChunks - 1 do
+  for Row := FMapScrollY to FMapScrollY + VisRows - 1 do
   begin
-    if DataY + Row >= FOutput.Height - 3 then Break;
+    ScreenRow := DataY + (Row - FMapScrollY);
     for G := StartG to VisG do
     begin
       T := GroupStart[G];
       if (Row < Length(TrackSecIDs[T])) and
          ((Row = 0) or TrackTops[T][Row]) then
-        FOutput.PutText(IDColX[G], DataY + Row,
+        FOutput.PutText(IDColX[G], ScreenRow,
           IntToHex(TrackSecIDs[T][Row], 2), $17);
     end;
     for T := VisFirst to VisLast do
@@ -2006,24 +2120,80 @@ begin
       ColX := TrackColX[T];
       if Row >= Length(TrackChunks[T]) then
         Continue
+      else if TrackTwins[T][Row] then
+      begin
+        { Twin sectors are drawn as a 7/8 block on a magenta background.
+          The thin gap at the top of each cell shows TwinBG bleeding
+          through, giving a visually distinct "twin column" against the
+          solid CH_FULL non-twin cells — even when the foreground is
+          dominated by a W/L/X protection color. Sector tops still get
+          the regular BoxBG so the boundary row keeps its meaning. }
+        if TrackTops[T][Row] then
+          Attr := (BoxBG shl 4) or TrackChunks[T][Row]
+        else
+          Attr := (TwinBG shl 4) or TrackChunks[T][Row];
+        FOutput.PutText(ColX, ScreenRow, CH_BLK7, Attr);
+      end
       else if TrackTops[T][Row] then
       begin
         Attr := (BoxBG shl 4) or TrackChunks[T][Row];
-        FOutput.PutText(ColX, DataY + Row, CH_BLK7, Attr);
+        FOutput.PutText(ColX, ScreenRow, CH_BLK7, Attr);
       end
       else
-        FOutput.PutText(ColX, DataY + Row, CH_FULL, TrackChunks[T][Row]);
+        FOutput.PutText(ColX, ScreenRow, CH_FULL, TrackChunks[T][Row]);
     end;
   end;
 
-  FOutput.PutText(3, FOutput.Height - 2,
-    ' [' + CH_FULL + '] Data  [' + CH_FULL + '] Dir  [' + CH_FULL + '] Boot  [' + CH_FULL + '] N/S  [' + CH_FULL + '] Err  [' + CH_FULL + '] Free ', $07);
-  FOutput.PutText(5, FOutput.Height - 2, CH_FULL, $0A);
-  FOutput.PutText(15, FOutput.Height - 2, CH_FULL, $0E);
-  FOutput.PutText(24, FOutput.Height - 2, CH_FULL, $0B);
-  FOutput.PutText(34, FOutput.Height - 2, CH_FULL, $0D);
-  FOutput.PutText(43, FOutput.Height - 2, CH_FULL, $0C);
-  FOutput.PutText(52, FOutput.Height - 2, CH_FULL, $08);
+  if MaxChunks > VisRows then
+    DrawScrollbar(FOutput.Width - 2, DataY, DataY + VisRows - 1,
+                  MaxChunks, VisRows, FMapScrollY, $1F);
+
+  { Two-line legend: state colors on the second-to-last row, protection
+    flags on the bottom row. Both lines suppress categories that don't
+    appear on this disk so a clean DOS-format disk only shows the state
+    swatches it actually used and skips the protection line entirely. }
+  ColX := 3;
+  FOutput.PutText(ColX, FOutput.Height - 3, ' ', $07); Inc(ColX);
+  FOutput.PutText(ColX, FOutput.Height - 3, CH_FULL, $0A);
+  FOutput.PutText(ColX + 1, FOutput.Height - 3, ' Data ', $07); Inc(ColX, 7);
+  FOutput.PutText(ColX, FOutput.Height - 3, CH_FULL, $0E);
+  FOutput.PutText(ColX + 1, FOutput.Height - 3, ' Dir ', $07); Inc(ColX, 6);
+  FOutput.PutText(ColX, FOutput.Height - 3, CH_FULL, $0B);
+  FOutput.PutText(ColX + 1, FOutput.Height - 3, ' Boot ', $07); Inc(ColX, 7);
+  FOutput.PutText(ColX, FOutput.Height - 3, CH_FULL, $08);
+  FOutput.PutText(ColX + 1, FOutput.Height - 3, ' Free ', $07); Inc(ColX, 7);
+
+  { Protection legend — only when at least one category is present. Twin
+    sample shows the actual chunk style (CH_BLK7 + magenta bg) so the
+    user can map the visual back to the data. }
+  if HasW or HasL or HasX or HasT then
+  begin
+    ColX := 3;
+    if HasX then
+    begin
+      FOutput.PutText(ColX, FOutput.Height - 2, CH_FULL, $0D);
+      FOutput.PutText(ColX + 1, FOutput.Height - 2, ' susp ID ', $07);
+      Inc(ColX, 10);
+    end;
+    if HasW then
+    begin
+      FOutput.PutText(ColX, FOutput.Height - 2, CH_FULL, $0C);
+      FOutput.PutText(ColX + 1, FOutput.Height - 2, ' weak DL ', $07);
+      Inc(ColX, 10);
+    end;
+    if HasL then
+    begin
+      FOutput.PutText(ColX, FOutput.Height - 2, CH_FULL, $0E);
+      FOutput.PutText(ColX + 1, FOutput.Height - 2, ' len mismatch ', $07);
+      Inc(ColX, 15);
+    end;
+    if HasT then
+    begin
+      FOutput.PutText(ColX, FOutput.Height - 2, CH_BLK7,
+                      (TwinBG shl 4) or $0F);
+      FOutput.PutText(ColX + 1, FOutput.Height - 2, ' twin (magenta bg) ', $07);
+    end;
+  end;
 end;
 
 function TTUIController.HexRows: Integer;
@@ -2594,13 +2764,11 @@ begin
     end;
   end;
 
-  { Push current container onto history and navigate into the new one. }
+  { Push current container onto history (with cursor/scroll + cursor-entry
+    name snapshot so ActionGoBack can restore visual position by identity)
+    and navigate into the new one. }
   Cont := ActiveContainer;
-  if Cont <> nil then
-  begin
-    SetLength(FHistory[FFocus], Length(FHistory[FFocus]) + 1);
-    FHistory[FFocus][High(FHistory[FFocus])] := Cont;
-  end;
+  if Cont <> nil then PushHistory(Cont);
   case FFocus of
     psLeft:  FLeft  := NewCont;
     psRight: FRight := NewCont;
@@ -2609,6 +2777,7 @@ begin
   SetActiveCursor(0);
   SetActiveScroll(0);
   FMapScrollX := 0;
+  FMapScrollY := 0;
 
   DiskInfo := IntToStr(NewCont.EntryCount) + ' entries';
   ShowMessageBox('Read OK — ' + DiskInfo + '.  Image: ' +
@@ -2806,11 +2975,24 @@ end;
 procedure TTUIController.ActionMapScrollHome;
 begin
   FMapScrollX := 0;
+  FMapScrollY := 0;
 end;
 
 procedure TTUIController.ActionMapScrollEnd;
 begin
   FMapScrollX := MaxInt;
+end;
+
+procedure TTUIController.ActionMapScrollUp;
+begin
+  if FMapScrollY > 0 then
+    Dec(FMapScrollY);
+end;
+
+procedure TTUIController.ActionMapScrollDown;
+begin
+  Inc(FMapScrollY);
+  { Upper bound is clamped in DrawSectorMap against MaxChunks. }
 end;
 
 procedure TTUIController.ActionPageUp;
@@ -2832,9 +3014,7 @@ begin
   Cont := ActiveContainer;
   if Cont = nil then Exit;
   PH := PaneHeight;
-  SetActiveCursor(ActiveCursor + PH);
-  if ActiveCursor >= Cont.EntryCount then
-    SetActiveCursor(Cont.EntryCount - 1);
+  SetActiveCursor(ClampCursor(ActiveCursor + PH, Cont.EntryCount));
   SetActiveScroll(ActiveScroll + PH);
   MaxScroll := Cont.EntryCount - PH;
   if MaxScroll < 0 then MaxScroll := 0;
@@ -2865,8 +3045,7 @@ begin
 
   if Supports(Entry, IContainer, SubCont) then
   begin
-    SetLength(FHistory[FFocus], Length(FHistory[FFocus]) + 1);
-    FHistory[FFocus][High(FHistory[FFocus])] := ActiveContainer;
+    PushHistory(ActiveContainer);
     case FFocus of
       psLeft: FLeft := SubCont;
       psRight: FRight := SubCont;
@@ -2876,6 +3055,7 @@ begin
     SetActiveCursor(0);
     SetActiveScroll(0);
     FMapScrollX := 0;
+    FMapScrollY := 0;
   end
   else if Supports(Entry, IExpandable, Exp) then
   begin
@@ -2885,8 +3065,7 @@ begin
       on E: Exception do begin ShowMessageBox(E.Message); Exit; end;
     end;
     if SubCont = nil then Exit;
-    SetLength(FHistory[FFocus], Length(FHistory[FFocus]) + 1);
-    FHistory[FFocus][High(FHistory[FFocus])] := ActiveContainer;
+    PushHistory(ActiveContainer);
     case FFocus of
       psLeft: FLeft := SubCont;
       psRight: FRight := SubCont;
@@ -2896,28 +3075,79 @@ begin
     SetActiveCursor(0);
     SetActiveScroll(0);
     FMapScrollX := 0;
+    FMapScrollY := 0;
+  end;
+end;
+
+procedure TTUIController.PushHistory(Cont: IContainer);
+var
+  H: ^THistoryEntry;
+  Entry: IEntry;
+begin
+  if Cont = nil then Exit;
+  SetLength(FHistory[FFocus], Length(FHistory[FFocus]) + 1);
+  H := @FHistory[FFocus][High(FHistory[FFocus])];
+  H^.Cont       := Cont;
+  H^.Cursor     := FCursors[FFocus];
+  H^.Scroll     := FScrolls[FFocus];
+  H^.CursorName := '';
+  { Capture the name of the entry the cursor was on. If the cursor was
+    out of range (empty container, transient state) leave the name empty
+    and ActionGoBack will fall back to the numeric Cursor + clamp. }
+  if (FCursors[FFocus] >= 0) and (FCursors[FFocus] < Cont.EntryCount) then
+  begin
+    Entry := Cont.GetEntry(FCursors[FFocus]);
+    if Entry <> nil then H^.CursorName := Entry.GetName;
+  end;
+end;
+
+function TTUIController.FindEntryByName(Cont: IContainer; const Name: string): Integer;
+var
+  I: Integer;
+  E: IEntry;
+begin
+  Result := -1;
+  if (Cont = nil) or (Name = '') then Exit;
+  for I := 0 to Cont.EntryCount - 1 do
+  begin
+    E := Cont.GetEntry(I);
+    if (E <> nil) and (E.GetName = Name) then Exit(I);
   end;
 end;
 
 procedure TTUIController.ActionGoBack;
 var
-  Prev: IContainer;
-  N: Integer;
+  Prev: THistoryEntry;
+  N, Found: Integer;
 begin
   N := Length(FHistory[FFocus]);
   if N = 0 then Exit;
   Prev := FHistory[FFocus][N - 1];
   SetLength(FHistory[FFocus], N - 1);
-  Prev.Refresh;
+  Prev.Cont.Refresh;
   case FFocus of
-    psLeft: FLeft := Prev;
-    psRight: FRight := Prev;
+    psLeft: FLeft := Prev.Cont;
+    psRight: FRight := Prev.Cont;
   end;
+  { ReapplySort + Refresh have settled the list — only NOW can we resolve
+    the cursor. Re-find by entry name (identity) first; if the entry is
+    gone (deletion, rename), fall back to the numeric index clamped to
+    the refreshed bounds. This keeps the cursor visually anchored to the
+    same file the user 'came from' even when sort order or sibling count
+    changed during the sub-navigation. }
   ReapplySort(FFocus);
   ResetSelections(FFocus);
-  SetActiveCursor(0);
-  SetActiveScroll(0);
+
+  Found := FindEntryByName(Prev.Cont, Prev.CursorName);
+  if Found >= 0 then
+    SetActiveCursor(Found)
+  else if Prev.Cont <> nil then
+    SetActiveCursor(ClampCursor(Prev.Cursor, Prev.Cont.EntryCount))
+  else
+    SetActiveCursor(0);
+  SetActiveScroll(Prev.Scroll);
   FMapScrollX := 0;
+  FMapScrollY := 0;
 end;
 
 procedure TTUIController.ActionSwitchPane;
@@ -3112,6 +3342,7 @@ begin
     tmCommander:
       begin
         FMapScrollX := 0;
+        FMapScrollY := 0;
         if EntryIsFile then
         begin
           if not EnterHexMode then
@@ -3137,7 +3368,7 @@ begin
       if HasSectors then FMode := tmSectorMap
       else FMode := tmCommander;
     tmSectorMap:
-      begin FMapScrollX := 0; FMode := tmCommander; end;
+      begin FMapScrollX := 0; FMapScrollY := 0; FMode := tmCommander; end;
   end;
 end;
 
@@ -3152,6 +3383,7 @@ begin
   end;
   if FMode = tmHex then begin SetLength(FHexData, 0); SetLength(FHexLines, 0); end;
   FMapScrollX := 0;
+  FMapScrollY := 0;
   FMode := tmDiskMap;
 end;
 
@@ -3166,6 +3398,7 @@ begin
   end;
   if FMode = tmHex then begin SetLength(FHexData, 0); SetLength(FHexLines, 0); end;
   FMapScrollX := 0;
+  FMapScrollY := 0;
   FMode := tmSectorMap;
 end;
 
@@ -3699,7 +3932,7 @@ procedure TTUIController.ActionExit;
     if (Cont <> nil) and Supports(Cont, IWritable, Writable) and Writable.Modified then
       Exit(True);
     for I := 0 to Length(FHistory[ASide]) - 1 do
-      if Supports(FHistory[ASide][I], IWritable, Writable) and Writable.Modified then
+      if Supports(FHistory[ASide][I].Cont, IWritable, Writable) and Writable.Modified then
         Exit(True);
   end;
 
@@ -3722,7 +3955,7 @@ end;
 procedure TTUIController.HandleMouse(const AEvent: TInputEvent);
 var
   Side: TPaneSide;
-  HalfW, Row, NewCursor: Integer;
+  HalfW, Row: Integer;
   Cont: IContainer;
   I: Integer;
 begin
@@ -3737,9 +3970,18 @@ begin
     if FMode = tmSectorMap then
     begin
       if AEvent.MouseWheel > 0 then
-        for I := 1 to 3 do ActionMapScrollRight
+        for I := 1 to 3 do ActionMapScrollDown
       else
-        for I := 1 to 3 do ActionMapScrollLeft;
+        for I := 1 to 3 do ActionMapScrollUp;
+      Exit;
+    end;
+    if FRoles[Side] = prSectorMap then
+    begin
+      if AEvent.MouseWheel > 0 then
+        Inc(FSmScrollY[Side], 3)
+      else
+        Dec(FSmScrollY[Side], 3);
+      if FSmScrollY[Side] < 0 then FSmScrollY[Side] := 0;
       Exit;
     end;
     if ContainerForSide(Side) = nil then Exit;
@@ -3769,11 +4011,7 @@ begin
       Cont := ActiveContainer;
       if (Cont = nil) or (Cont.EntryCount = 0) then Exit;
       Row := AEvent.MouseY - 4;
-      NewCursor := ActiveScroll + Row;
-      if NewCursor >= Cont.EntryCount then
-        NewCursor := Cont.EntryCount - 1;
-      if NewCursor < 0 then NewCursor := 0;
-      SetActiveCursor(NewCursor);
+      SetActiveCursor(ClampCursor(ActiveScroll + Row, Cont.EntryCount));
     end;
   end;
 end;
@@ -3845,6 +4083,7 @@ begin
   FRunning := True;
   FMenuOpen := False;
   FMapScrollX := 0;
+  FMapScrollY := 0;
   FModifierState := 0;
   FLastModifierState := $FF;  { sentinel: force redraw on first real event }
 end;
@@ -3906,10 +4145,10 @@ begin
   begin
     case AEvent.Action of
       kaEsc, kaF10, kaBackspace:
-        begin FMapScrollX := 0; FMode := tmCommander; Exit; end;
+        begin FMapScrollX := 0; FMapScrollY := 0; FMode := tmCommander; Exit; end;
       kaChar:
         if UpCase(AEvent.CharValue) = 'Q' then
-        begin FMapScrollX := 0; FMode := tmCommander; Exit; end;
+        begin FMapScrollX := 0; FMapScrollY := 0; FMode := tmCommander; Exit; end;
     end;
   end;
 
@@ -3927,12 +4166,25 @@ begin
               and (ActiveContainer <> nil)
               and (ActiveCursor < ActiveContainer.EntryCount - 1) then
         SetActiveCursor(ActiveCursor + 1);
-    kaUp:        if FMode <> tmSectorMap then ActionNavigateUp;
-    kaDown:      if FMode <> tmSectorMap then ActionNavigateDown;
+    kaUp:
+      if FMode = tmSectorMap then ActionMapScrollUp
+      else ActionNavigateUp;
+    kaDown:
+      if FMode = tmSectorMap then ActionMapScrollDown
+      else ActionNavigateDown;
     kaHome:      if FMode = tmSectorMap then ActionMapScrollHome else ActionHome;
     kaEnd:       if FMode = tmSectorMap then ActionMapScrollEnd else ActionEnd;
-    kaPageUp:    if FMode <> tmSectorMap then ActionPageUp;
-    kaPageDown:  if FMode <> tmSectorMap then ActionPageDown;
+    kaPageUp:
+      if FMode = tmSectorMap then
+      begin
+        Dec(FMapScrollY, FOutput.Height - 10);
+        if FMapScrollY < 0 then FMapScrollY := 0;
+      end
+      else ActionPageUp;
+    kaPageDown:
+      if FMode = tmSectorMap then
+        Inc(FMapScrollY, FOutput.Height - 10)
+      else ActionPageDown;
     kaEnter:
       if FRoles[FFocus] = prTree then ActionTreeToggleExpand
       else ActionEnter;
@@ -4066,17 +4318,18 @@ begin
   { Cursor + scroll: clamp to current container size. A persisted cursor
     past the end of a now-smaller listing would otherwise hide the cursor
     on first paint. }
-  FCursors[ASide] := APane.Cursor;
-  FScrolls[ASide] := APane.Scroll;
   if Cont <> nil then
   begin
-    if FCursors[ASide] < 0 then FCursors[ASide] := 0;
-    if FCursors[ASide] >= Cont.EntryCount then
-      FCursors[ASide] := Cont.EntryCount - 1;
-    if FCursors[ASide] < 0 then FCursors[ASide] := 0;
+    FCursors[ASide] := ClampCursor(APane.Cursor, Cont.EntryCount);
+    FScrolls[ASide] := APane.Scroll;
     if FScrolls[ASide] < 0 then FScrolls[ASide] := 0;
     if FScrolls[ASide] > FCursors[ASide] then
       FScrolls[ASide] := FCursors[ASide];
+  end
+  else
+  begin
+    FCursors[ASide] := 0;
+    FScrolls[ASide] := 0;
   end;
 end;
 
