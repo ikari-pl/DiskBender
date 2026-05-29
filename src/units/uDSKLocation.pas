@@ -121,6 +121,11 @@ type
 
 function CreateDSKAwareEntry(const AFullPath: string): IEntry;
 
+{ Compute the protection-aware sector map for a disk image.
+  Extracted from TDSKContainer so the GUI can call it with its existing
+  IVirtualDisk + IFilesystem pair without creating a container object. }
+function ComputeDiskSectorMap(ADisk: IVirtualDisk; AFS: IFilesystem): TTrackColumnArray;
+
 implementation
 
 uses
@@ -492,7 +497,7 @@ begin
   FSectorMapValid := True;
 end;
 
-function TDSKContainer.ComputeSectorMap: TTrackColumnArray;
+function ComputeDiskSectorMap(ADisk: IVirtualDisk; AFS: IFilesystem): TTrackColumnArray;
 var
   I, J, K, L: Integer;
   DPB: TCPMDPB;
@@ -503,7 +508,7 @@ var
   SortedIDs: TBytes;
   IsDir: array of Boolean;
 begin
-  DPB := FFS.GetDPB;
+  DPB := AFS.GetDPB;
   ReservedTracks := DPB.OFF;
 
   DirBlocks := 0;
@@ -514,9 +519,9 @@ begin
   end;
 
   DirSectors := 0;
-  if (ReservedTracks < FDisk.NumTracks) then
+  if (ReservedTracks < ADisk.NumTracks) then
   begin
-    TI := FDisk.GetTrackInfo(ReservedTracks);
+    TI := ADisk.GetTrackInfo(ReservedTracks);
     if TI.NumSectors > 0 then
     begin
       PhysSectorSize := 128 shl TI.SectorInfos[0].SectorSize;
@@ -525,11 +530,11 @@ begin
     end;
   end;
 
-  SetLength(Result, FDisk.NumTracks);
+  SetLength(Result, ADisk.NumTracks);
 
-  for I := 0 to FDisk.NumTracks - 1 do
+  for I := 0 to ADisk.NumTracks - 1 do
   begin
-    TI := FDisk.GetTrackInfo(I);
+    TI := ADisk.GetTrackInfo(I);
     Result[I].TrackNum := TI.TrackNum;
     Result[I].SideNum := TI.SideNum;
     Result[I].FillerByte := TI.FillerByte;
@@ -545,7 +550,7 @@ begin
       IsDir[J] := False;
     if (I = ReservedTracks) and (DirSectors > 0) and (TI.NumSectors > 0) then
     begin
-      SortedIDs := FDisk.GetSortedSectorIDs(I);
+      SortedIDs := ADisk.GetSortedSectorIDs(I);
       for L := 0 to DirSectors - 1 do
       begin
         if L >= TI.NumSectors then Break;
@@ -571,7 +576,7 @@ begin
         copy-protected discs this routinely differs from the IDAM nominal
         SizeBytes (e.g. declared 512B / actual 2B) — exposing the mismatch
         is the whole point of the protection-aware sector map. }
-      Data := FDisk.GetSectorData(I, J);
+      Data := ADisk.GetSectorData(I, J);
       Result[I].Sectors[J].ActualLen := Length(Data);
 
       { Conventional CPC/PCW SectorID ranges. $00-$1F covers IBM-compat
@@ -612,6 +617,11 @@ begin
         Result[I].Sectors[J].State := ssSystem;
     end;
   end;
+end;
+
+function TDSKContainer.ComputeSectorMap: TTrackColumnArray;
+begin
+  Result := ComputeDiskSectorMap(FDisk, FFS);
 end;
 
 function TDSKContainer.GetPath: string;
