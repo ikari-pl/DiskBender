@@ -283,30 +283,38 @@ begin
 
   FirstID := TI.SectorInfos[0].SectorID;
   case FirstID of
+    { IBM-compatible and CP/M Plus boot disks both use sector IDs $01–$09.
+      Default to OFF=0 (IBM directory at track 0); the probe below adjusts
+      OFF if the directory turns out to be on a later track (CP/M Plus). }
     $01: FDPB := DPB_CPC_DATA;
+    { CP/M 2.2 SYSTEM format: sector IDs $41–$49, two reserved boot tracks
+      (OFF=2).  AMSDOS recognises this as a "system disc" and |CPM boots it. }
     $41: FDPB := DPB_CPC_SYSTEM;
+    { Standard CPC DATA format: sector IDs $C1–$C9 (AMSDOS games and user
+      files).  This is the format AMSDOS uses for its own filesystem, with
+      the directory at track 0 (OFF=0).  No boot sector descriptor. }
     $C1: FDPB := DPB_CPC_DATA;
   else
     FDPB := DPB_CPC_DATA;
   end;
 
-  { IBM-compat 8-sector format override. }
+  { True IBM 8-sector format: $01-based IDs with exactly 8 sectors/track. }
   if (FirstID = $01) and (TI.NumSectors = 8) then
   begin
     FDPB.OFF := 1;
     FDPB.SPT := 32;
   end;
 
-  { For 0x01-based sector IDs (non-IBM), the first-sector-ID heuristic
-    cannot distinguish a plain DATA disk (directory at track 0) from a
-    CP/M Plus system disk that also uses 0x01-based IDs on its boot
-    tracks.  Validate the candidate OFF track by sampling its first
-    sector and counting entries with valid user bytes (0..CPM_MAX_USER
-    or CPM_DELETED_USER).  Machine code has ~6 % valid bytes by chance;
-    a real directory has 100 %.  If fewer than 3/4 qualify, advance OFF
-    and retry — up to two extra tracks.
-    Note: TryGetDirEntry is defined after this function, so bounds are
-    checked inline via SizeOf(TCPMDirEntry) rather than calling it. }
+  { For 9-sector $01-based disks the sector-ID lookup defaults to OFF=0
+    (IBM-style directory at track 0).  CP/M Plus boot disks also use
+    $01-based IDs but reserve one or more tracks for bootstrap code and
+    place the directory at a higher track.  Validate the candidate OFF
+    track by sampling its first sector and counting entries with valid
+    user bytes (0..CPM_MAX_USER or CPM_DELETED_USER).  Machine code
+    scores ~6 % valid by chance; a real directory scores 100 %.  If
+    fewer than 3/4 qualify, advance OFF and retry — up to two extra
+    tracks.  Note: TryGetDirEntry is defined after this function; bounds
+    are checked inline via SizeOf(TCPMDirEntry) rather than calling it. }
   if (FirstID = $01) and (TI.NumSectors <> 8) then
   begin
     for ProbeOff := FDPB.OFF to FDPB.OFF + 2 do
