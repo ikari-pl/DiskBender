@@ -18,19 +18,12 @@ uses
   Classes, SysUtils, Math, DateUtils, Forms, Controls, Graphics, Dialogs,
   ComCtrls, ExtCtrls, Menus, ActnList, StdCtrls, Buttons, LCLType,
   uDSK, uCPM, uInterfaces, uCPMTypes, uFormatters, uViewers, CoreAPI,
-  uExternalDrive, uDSKLocation, uVFS;
+  uExternalDrive, uDSKLocation, uVFS, uGUISorting;
 
 type
-  THostEntry = record
-    Kind: TRowKind;
-    Name: string;
-    Size: Int64;
-    Time: TDateTime;
-  end;
-  THostEntryArray = array of THostEntry;
-
-  THostSortField = (hsName, hsSize, hsTime);
-  TPaneMode      = (pmDir, pmDSK);
+  { THostEntry, THostEntryArray, THostSortField — moved to uGUISorting.pas
+    so SortHostEntryArray can be tested without any LCL dependency. }
+  TPaneMode = (pmDir, pmDSK);
 
   { ===================================================================== }
   { TPane — encapsulates one panel's entire state and rendering.          }
@@ -95,11 +88,11 @@ type
     property Other:      TPane           read FOther    write FOther;
     property ListView:   TListView       read FListView;
     property Entries:    THostEntryArray read FEntries;
-    property DirSortFld: THostSortField  read FSortField write FSortField;
-    property DirSortAsc: Boolean         read FSortAsc   write FSortAsc;
-    property DirDirsFirst: Boolean       read FDirsFirst write FDirsFirst;
-    property DSKSortFld: TFileSortField  read FDSKSortFld write FDSKSortFld;
-    property DSKSortAsc: Boolean         read FDSKSortAsc write FDSKSortAsc;
+    property DirSortFld:   THostSortField  read FSortField;
+    property DirSortAsc:   Boolean         read FSortAsc;
+    property DirDirsFirst: Boolean         read FDirsFirst;
+    property DSKSortFld:   TFileSortField  read FDSKSortFld;
+    property DSKSortAsc:   Boolean         read FDSKSortAsc;
   end;
 
   { ===================================================================== }
@@ -136,13 +129,20 @@ type
     MenuHelp: TMenuItem;
     MenuAbout: TMenuItem;
 
-    ToolBar: TToolBar;
-    ToolOpen: TToolButton;
-    ToolSave: TToolButton;
-    ToolSep1: TToolButton;
-    ToolCopyToDSK: TToolButton;
-    ToolCopyToHost: TToolButton;
-    ToolDelete: TToolButton;
+    PanelMenuBar: TPanel;
+    BtnMenuFile:   TSpeedButton;
+    BtnMenuEdit:   TSpeedButton;
+    BtnMenuView:   TSpeedButton;
+    BtnMenuDrive:  TSpeedButton;
+    BtnMenuWindow: TSpeedButton;
+    BtnMenuHelp:   TSpeedButton;
+
+    PopupFile:   TPopupMenu;
+    PopupEdit:   TPopupMenu;
+    PopupView:   TPopupMenu;
+    PopupDrive:  TPopupMenu;
+    PopupWindow: TPopupMenu;
+    PopupHelp:   TPopupMenu;
 
     StatusBar: TStatusBar;
 
@@ -209,6 +209,8 @@ type
     procedure ActDriveWriteExecute(Sender: TObject);
     procedure ActDriveInfoExecute(Sender: TObject);
 
+    procedure BtnMenuClick(Sender: TObject);
+
     procedure MenuMinimizeClick(Sender: TObject);
     procedure BtnF1HelpClick(Sender: TObject);
     procedure BtnF2RenameClick(Sender: TObject);
@@ -224,7 +226,7 @@ type
     { LFM-wired list events — delegate to unified pane handlers. }
     procedure ListViewDSKDblClick(Sender: TObject);
     procedure ListViewHostDblClick(Sender: TObject);
-    procedure ListViewDSKSelectItem(Sender: TObject; Item: TListItem; Selected: Boolean);
+    { OnSelectItem is wired in FormCreate to @AnyPaneSelectItem — no LFM stub needed. }
     procedure ListViewDSKColumnClick(Sender: TObject; Column: TListColumn);
     procedure ListViewHostColumnClick(Sender: TObject; Column: TListColumn);
     procedure ListViewDSKDragOver(Sender, Source: TObject; X, Y: Integer;
@@ -250,6 +252,7 @@ type
       have a viewer that silently misses selection changes. }
     FTrackedViewers:  TList;
 
+    procedure RebuildPopupFromMenu(ASrc: TMenuItem; ADst: TPopupMenu);
     procedure TrackViewer(AForm: TViewerForm);
     procedure ViewerClosed(Sender: TObject);
     procedure DispatchSelectionChanged(APane: TPane; Item: TListItem; Selected: Boolean);
@@ -317,49 +320,6 @@ implementation
 {$R *.lfm}
 
 { ======================================================================= }
-{ Shared sort algorithm                                                    }
-{ ======================================================================= }
-
-procedure SortHostEntryArray(var Arr: THostEntryArray;
-                              Field: THostSortField; Asc, DirsFirst: Boolean);
-var
-  I, J: Integer;
-  Tmp:  THostEntry;
-
-  function Less(const A, B: THostEntry): Boolean;
-  var DA, DB, Raw: Integer;
-  begin
-    if A.Kind = rkParent then Exit(True);
-    if B.Kind = rkParent then Exit(False);
-    if DirsFirst then
-    begin
-      DA := Ord(A.Kind <> rkHostDir);
-      DB := Ord(B.Kind <> rkHostDir);
-      if DA <> DB then Exit(DA < DB);
-    end;
-    Raw := 0;
-    case Field of
-      hsName: Raw := AnsiCompareText(A.Name, B.Name);
-      hsSize: Raw := CompareValue(A.Size, B.Size);
-      hsTime: Raw := CompareDateTime(A.Time, B.Time);
-    end;
-    if not Asc then Raw := -Raw;
-    Result := Raw < 0;
-  end;
-
-begin
-  for I := 1 to High(Arr) do
-  begin
-    J := I;
-    while (J > 0) and Less(Arr[J], Arr[J - 1]) do
-    begin
-      Tmp := Arr[J]; Arr[J] := Arr[J - 1]; Arr[J - 1] := Tmp;
-      Dec(J);
-    end;
-  end;
-end;
-
-{ ======================================================================= }
 { TPane                                                                    }
 { ======================================================================= }
 
@@ -405,7 +365,7 @@ begin
     Inc(N);
   end;
 
-  if FindFirst(FPath + PathDelim + '*', faAnyFile, SR) = 0 then
+  if FindFirst(IncludeTrailingPathDelimiter(FPath) + '*', faAnyFile, SR) = 0 then
   begin
     repeat
       if (SR.Name = '.') or (SR.Name = '..') then Continue;
@@ -843,6 +803,34 @@ end;
   FormCreate / FormDestroy
 ----------------------------------------------------------------------- }
 
+procedure TMainForm.RebuildPopupFromMenu(ASrc: TMenuItem; ADst: TPopupMenu);
+{ Populates ADst with new TMenuItems mirroring ASrc's direct children.
+  Action-wired items share the TAction ref.  Items without an Action
+  (e.g. Minimize) copy OnClick directly.  Caption='-' becomes a separator. }
+var
+  I:    Integer;
+  Item: TMenuItem;
+  Src:  TMenuItem;
+begin
+  ADst.Items.Clear;
+  for I := 0 to ASrc.Count - 1 do
+  begin
+    Src  := ASrc.Items[I];
+    Item := TMenuItem.Create(ADst);
+    if Src.Caption = '-' then
+      Item.Caption := '-'
+    else
+    begin
+      Item.Caption := Src.Caption;
+      if Src.Action <> nil then
+        Item.Action := Src.Action
+      else
+        Item.OnClick := Src.OnClick;
+    end;
+    ADst.Items.Add(Item);
+  end;
+end;
+
 procedure TMainForm.FormCreate(Sender: TObject);
 var
   I:           Integer;
@@ -856,6 +844,25 @@ begin
     Supported args (injected by LaunchGui via 'open --args'):
       --cwd <dir>   : start directory for both panes
       <path.dsk>    : DSK file to open in the left pane }
+  { In-window menu bar is only useful on macOS/Cocoa where TMainMenu lives in
+    the system bar outside the window. On other widgetsets (including GTK2/Qt5
+    on macOS) TMainMenu renders inside the window itself, so the extra bar
+    would be a duplicate. LCLCocoa is the precise guard; DARWIN would also hide
+    the bar on macOS+GTK2 or macOS+Qt5 builds. }
+  {$IFNDEF LCLCocoa}
+  PanelMenuBar.Visible := False;
+  PanelMenuBar.Height  := 0;
+  {$ENDIF}
+
+  { Populate in-window popup menus from TMainMenu children so items
+    stay in sync automatically — no duplicate declarations needed. }
+  RebuildPopupFromMenu(MenuFile,   PopupFile);
+  RebuildPopupFromMenu(MenuEdit,   PopupEdit);
+  RebuildPopupFromMenu(MenuView,   PopupView);
+  RebuildPopupFromMenu(MenuDrive,  PopupDrive);
+  RebuildPopupFromMenu(MenuWindow, PopupWindow);
+  RebuildPopupFromMenu(MenuHelp,   PopupHelp);
+
   StartDir    := GetCurrentDir;
   OpenDSKPath := '';
   I := 1;
@@ -1001,6 +1008,12 @@ begin
     FDockedPlatter.Close;
     FDockedPlatter := nil;
   end;
+  { Close tracked viewers before freeing panes — viewers call back into pane
+    state via DispatchSelectionChanged; accessing freed panes is a use-after-free.
+    Close() fires OnDestroy → ViewerClosed → FTrackedViewers.Remove, so the
+    while-loop converges rather than iterating a shrinking list. }
+  while FTrackedViewers.Count > 0 do
+    TViewerForm(FTrackedViewers[0]).Close;
   FPanes[0].Free;
   FPanes[1].Free;
   FTrackedViewers.Free;
@@ -1211,9 +1224,6 @@ begin
   PaneDblClick(FPanes[1]);
   UpdateBreadcrumb(FPanes[1].Path);
 end;
-
-procedure TMainForm.ListViewDSKSelectItem(Sender: TObject; Item: TListItem; Selected: Boolean);
-begin end; { overridden in FormCreate by AnyPaneSelectItem }
 
 procedure TMainForm.ListViewDSKColumnClick(Sender: TObject; Column: TListColumn);
 begin PaneColumnClick(FPanes[0], Column); end;
@@ -1705,6 +1715,32 @@ end;
 { -----------------------------------------------------------------------
   Window menu
 ----------------------------------------------------------------------- }
+
+{ -----------------------------------------------------------------------
+  In-window menu bar — TSpeedButton row that mirrors TMainMenu on macOS
+  where TMainMenu lives in the system bar outside the window.
+  Each button pops its TPopupMenu aligned to the button's bottom-left.
+----------------------------------------------------------------------- }
+procedure TMainForm.BtnMenuClick(Sender: TObject);
+{ Single handler for all six in-window menu-bar buttons.
+  Each button's Tag encodes which TPopupMenu to show:
+    0=File  1=Edit  2=View  3=Drive  4=Window  5=Help }
+var
+  B: TSpeedButton;
+  P: TPoint;
+  Menus: array[0..5] of TPopupMenu;
+begin
+  Menus[0] := PopupFile;
+  Menus[1] := PopupEdit;
+  Menus[2] := PopupView;
+  Menus[3] := PopupDrive;
+  Menus[4] := PopupWindow;
+  Menus[5] := PopupHelp;
+  B := Sender as TSpeedButton;
+  if (B.Tag < Low(Menus)) or (B.Tag > High(Menus)) then Exit;
+  P := B.ClientToScreen(Point(0, B.Height));
+  Menus[B.Tag].Popup(P.X, P.Y);
+end;
 
 procedure TMainForm.MenuMinimizeClick(Sender: TObject);
 begin Application.Minimize; end;

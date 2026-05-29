@@ -321,7 +321,10 @@ begin
     WriteLn('Build it with: lazbuild src/gui/DiskBenderGUI.lpi');
     Halt(1);
   end;
-  ExecuteProcess('/usr/bin/open', [AppPath, '--args', '--cwd', GetCurrentDir, APath]);
+  if APath <> '' then
+    ExecuteProcess('/usr/bin/open', [AppPath, '--args', '--cwd', GetCurrentDir, APath])
+  else
+    ExecuteProcess('/usr/bin/open', [AppPath, '--args', '--cwd', GetCurrentDir]);
 end;
 
 function IsValidDrive(const S: string): Boolean;

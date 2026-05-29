@@ -32,6 +32,14 @@ cd /Users/ikari/src/cpc/DiskBender && fpc -Fu./src/units -Fu./src/tui -Fu./src t
 cd /Users/ikari/src/cpc/DiskBender && fpc -Fu./src/units -Fu./src/tui -Fu./src -Fu./tests tests/test_cpm_write.pas -otests/test_cpm_write && ./tests/test_cpm_write
 ```
 
+```bash
+cd /Users/ikari/src/cpc/DiskBender && fpc -Fu./src/units -Fu./src/gui -Fu./src tests/test_gui_sort.pas -otests/test_gui_sort && ./tests/test_gui_sort
+```
+
+```bash
+cd /Users/ikari/src/cpc/DiskBender && fpc -Fu./src/units -Fu./src -Fu./tests tests/test_dsk_location.pas -otests/test_dsk_location && ./tests/test_dsk_location
+```
+
 ## Run
 
 ```bash

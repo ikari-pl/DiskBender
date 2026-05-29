@@ -132,50 +132,94 @@ object MainForm: TMainForm
     end
   end
   
-  object ToolBar: TToolBar
+  object PanelMenuBar: TPanel
     Left = 0
     Height = 26
     Top = 0
     Width = 900
-    Caption = 'ToolBar'
+    Align = alTop
+    BevelOuter = bvNone
+    ClientHeight = 26
+    ClientWidth = 900
     TabOrder = 0
-    
-    object ToolOpen: TToolButton
-      Left = 1
-      Top = 2
-      Action = ActOpen
-      Caption = 'Open'
+    object BtnMenuFile: TSpeedButton
+      Left = 0
+      Height = 26
+      Top = 0
+      Width = 46
+      Caption = 'File'
+      Flat = True
+      Tag = 0
+      OnClick = BtnMenuClick
     end
-    object ToolSave: TToolButton
-      Left = 44
-      Top = 2
-      Action = ActSave
-      Caption = 'Save'
+    object BtnMenuEdit: TSpeedButton
+      Left = 46
+      Height = 26
+      Top = 0
+      Width = 46
+      Caption = 'Edit'
+      Flat = True
+      Tag = 1
+      OnClick = BtnMenuClick
     end
-    object ToolSep1: TToolButton
-      Left = 87
-      Top = 2
-      Width = 8
-      Style = tbsSeparator
+    object BtnMenuView: TSpeedButton
+      Left = 92
+      Height = 26
+      Top = 0
+      Width = 46
+      Caption = 'View'
+      Flat = True
+      Tag = 2
+      OnClick = BtnMenuClick
     end
-    object ToolCopyToDSK: TToolButton
-      Left = 95
-      Top = 2
-      Action = ActCopyToDSK
-      Caption = '→DSK'
-    end
-    object ToolCopyToHost: TToolButton
+    object BtnMenuDrive: TSpeedButton
       Left = 138
-      Top = 2
-      Action = ActCopyToHost
-      Caption = '→Host'
+      Height = 26
+      Top = 0
+      Width = 54
+      Caption = 'Drive'
+      Flat = True
+      Tag = 3
+      OnClick = BtnMenuClick
     end
-    object ToolDelete: TToolButton
-      Left = 181
-      Top = 2
-      Action = ActDelete
-      Caption = 'Delete'
+    object BtnMenuWindow: TSpeedButton
+      Left = 192
+      Height = 26
+      Top = 0
+      Width = 66
+      Caption = 'Window'
+      Flat = True
+      Tag = 4
+      OnClick = BtnMenuClick
     end
+    object BtnMenuHelp: TSpeedButton
+      Left = 258
+      Height = 26
+      Top = 0
+      Width = 46
+      Caption = 'Help'
+      Flat = True
+      Tag = 5
+      OnClick = BtnMenuClick
+    end
+  end
+
+  object PopupFile: TPopupMenu
+  end
+
+  object PopupEdit: TPopupMenu
+  end
+
+  object PopupView: TPopupMenu
+  end
+
+  object PopupDrive: TPopupMenu
+  end
+
+  object PopupWindow: TPopupMenu
+  end
+
+  object PopupHelp: TPopupMenu
   end
   
   object PanelBottom: TPanel
@@ -332,7 +376,6 @@ object ListViewDSK: TListView
       ViewStyle = vsReport
       DragMode = dmAutomatic
       OnDblClick = ListViewDSKDblClick
-      OnSelectItem = ListViewDSKSelectItem
       OnColumnClick = ListViewDSKColumnClick
       OnDragOver = ListViewDSKDragOver
       OnDragDrop = ListViewDSKDragDrop
