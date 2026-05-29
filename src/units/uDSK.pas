@@ -234,6 +234,24 @@ begin
   CurrentOffset := 256;
   for I := 0 to (FHeader.NumTracks * FHeader.NumSides) - 1 do
   begin
+    { Determine the on-disk block size for this track up front so we can
+      handle unformatted Extended-DSK tracks before touching the stream. }
+    if FDSKType = dtStandard then
+      TSize := FHeader.TrackSize
+    else
+      TSize := FHeader.TrackSizes[I] * 256;
+
+    { Extended DSK: TrackSizes[I]=0 means the track is unformatted — no
+      Track-Info block is written to the stream for it.  Treat the slot
+      as empty (NumSectors=0) and leave CurrentOffset unchanged. }
+    if (FDSKType = dtExtended) and (TSize = 0) then
+    begin
+      FillChar(FTracks[I], SizeOf(TTrackInfoBlock), 0);
+      SetLength(FSectorDataOffsets[I], 0);
+      FDataOffsets[I] := CurrentOffset;
+      Continue;
+    end;
+
     if CurrentOffset + SizeOf(TTrackInfoBlock) > FStream.Size then
       raise EDiskError.CreateFmt('Truncated DSK image at track %d.', [I]);
 
@@ -263,11 +281,6 @@ begin
       else
         SectorDataOffset := SectorDataOffset + FTracks[I].SectorInfos[J].DataLength;
     end;
-
-    if FDSKType = dtStandard then
-      TSize := FHeader.TrackSize
-    else
-      TSize := FHeader.TrackSizes[I] * 256;
 
     CurrentOffset := CurrentOffset + TSize;
   end;
