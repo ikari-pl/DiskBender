@@ -268,8 +268,14 @@ end;
 
 procedure TDiskBenderCPM.AutoDetectFormat;
 var
-  TI: TTrackInfoBlock;
-  FirstID: Byte;
+  TI:          TTrackInfoBlock;
+  FirstID:     Byte;
+  ProbeSec:    TBytes;
+  ProbeOff:    Integer;
+  ValidCount:  Integer;
+  TotalEntries: Integer;
+  E:           Integer;
+  UserByte:    Byte;
 begin
   if FDisk = nil then Exit;
   TI := FDisk.GetTrackInfo(0);
@@ -289,6 +295,44 @@ begin
   begin
     FDPB.OFF := 1;
     FDPB.SPT := 32;
+  end;
+
+  { For 0x01-based sector IDs (non-IBM), the first-sector-ID heuristic
+    cannot distinguish a plain DATA disk (directory at track 0) from a
+    CP/M Plus system disk that also uses 0x01-based IDs on its boot
+    tracks.  Validate the candidate OFF track by sampling its first
+    sector and counting entries with valid user bytes (0..CPM_MAX_USER
+    or CPM_DELETED_USER).  Machine code has ~6 % valid bytes by chance;
+    a real directory has 100 %.  If fewer than 3/4 qualify, advance OFF
+    and retry — up to two extra tracks.
+    Note: TryGetDirEntry is defined after this function, so bounds are
+    checked inline via SizeOf(TCPMDirEntry) rather than calling it. }
+  if (FirstID = $01) and (TI.NumSectors <> 8) then
+  begin
+    for ProbeOff := FDPB.OFF to FDPB.OFF + 2 do
+    begin
+      if ProbeOff >= FDisk.NumTracks then Break;
+      ProbeSec := ReadLogicalSector(ProbeOff, 0);
+      if ProbeSec = nil then Continue;
+      ValidCount    := 0;
+      TotalEntries  := 0;
+      E := 0;
+      while (E + 1) * SizeOf(TCPMDirEntry) <= Length(ProbeSec) do
+      begin
+        UserByte := ProbeSec[E * SizeOf(TCPMDirEntry)];
+        Inc(TotalEntries);
+        if (UserByte <= CPM_MAX_USER) or (UserByte = CPM_DELETED_USER) then
+          Inc(ValidCount);
+        Inc(E);
+      end;
+      { Accept this track as the directory if ≥ 75 % of entry slots have
+        a plausible user byte. }
+      if (TotalEntries > 0) and (ValidCount * 4 >= TotalEntries * 3) then
+      begin
+        FDPB.OFF := ProbeOff;
+        Break;
+      end;
+    end;
   end;
 end;
 
